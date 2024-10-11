@@ -2,22 +2,13 @@
 
 In this repository I will be trying to translate the jupyter notebook to a set of python modules that can be called from a few scripts.
 
-# Building the docker image
-
-Please copy the extracted data as 'enveda_library_subset.parquet' into the main directory of the repo.
-
-## Build the base image with the data:
-
-```bash
-docker build -f docker/Dockerfile.base -t base_image .
-```
-
+Information on how to set-up a virtualenv using poetry can be found [here](docs/virtual-env-instructions.md)
 
 # Data
 
 The original data should be downloaded to 'data/raw/enveda_library_subset.parquet'
 
-
+See the data information [here](docs/about_the_data.md)
 
 # Splitting small subset of data for experimentation
 
