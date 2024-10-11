@@ -1,10 +1,9 @@
 import pandas as pd
 import pyarrow.parquet as pq
-import numpy as np
 
 # File paths
-input_file = 'data/raw/enveda_library_subset.parquet'
-output_file = 'data/raw/enveda_library_subset_10percent.parquet'
+input_file = "data/raw/enveda_library_subset.parquet"
+output_file = "data/raw/enveda_library_subset_10percent.parquet"
 
 # Read the Parquet file metadata
 parquet_file = pq.ParquetFile(input_file)

@@ -24,7 +24,7 @@ If poetry is not in there
 
 ```bash
  curl -sSL https://install.python-poetry.org | python3.11 -
-``` 
+```
 
 ### Step 2: Clone the Project
 
