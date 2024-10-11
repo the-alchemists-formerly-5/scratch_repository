@@ -85,7 +85,7 @@ And to look at the records, remembering that parquet is a column first format:
 ```
 
 
-# Splitting small subset of data for experimentation
+## Splitting small subset of data for experimentation
 
 As the full data is a big file, for experimentation we can split it into a 10% subset using the following script
 
@@ -94,3 +94,7 @@ python3 scripts/extract_subset.py
 ```
 
 This will generate the file 'data/raw/enveda_library_subset_10percent.parquet'
+
+# How to split the test/train data
+
+[Blog to read](https://practicalcheminformatics.blogspot.com/2023/06/getting-real-with-molecular-property.html)
