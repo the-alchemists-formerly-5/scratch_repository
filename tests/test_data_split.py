@@ -1,7 +1,8 @@
 import polars as pl
 import pytest
 
-from team5.data.data_split import sort_dataframe_by_scaffold, split_dataframe
+from src.team5.data.data_split import (sort_dataframe_by_scaffold,
+                                       split_dataframe)
 
 
 @pytest.fixture
