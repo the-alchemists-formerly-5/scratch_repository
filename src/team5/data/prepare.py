@@ -93,7 +93,9 @@ PREPARED_PARQUET = "prepared.parquet"
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
     values = dict(
-        enumerate(pl.scan_parquet(parquet).select(column).unique().collect()[column].sort())
+        enumerate(
+            pl.scan_parquet(parquet).select(column).unique().collect()[column].sort()
+        )
     )
     return {v: k for k, v in values.items()}
 
@@ -101,7 +103,7 @@ def _enumerize(parquet: Path, column: str) -> dict[str, int]:
 def interleave(elem: pl.Struct) -> list[float]:
     labels = list(chain.from_iterable(zip(elem["mzs"], elem["intensities"])))
     padding = [0.0] * (MAX_MZS * 2 - len(labels))
-    return labels + padding
+    return labels[: 2 * MAX_MZS] + padding
 
 
 def vectorize(lookup: dict[str, int], elem: str) -> list[int]:
@@ -128,7 +130,8 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     print("Transforming raw data and writing prepared data to disk")
     df.lazy().with_columns(
         tokenized_smiles=pl.col("smiles").map_elements(
-            partial(tokenizer.encode, padding="max_length"), return_dtype=pl.List(pl.Int64)
+            partial(tokenizer.encode, padding="max_length"),
+            return_dtype=pl.List(pl.Int64),
         ),
         attention_mask=pl.col("smiles").map_elements(
             partial(attention_mask, tokenizer), return_dtype=pl.List(pl.Int64)
@@ -151,12 +154,12 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
                 "precursor_mz", "precursor_charge", "enum_in_silico", "enum_adduct"
             ).alias("supplementary_data"),
         ]
-    ).sink_parquet(PREPARED_PARQUET)
+    ).sink_parquet(
+        PREPARED_PARQUET
+    )
 
 
-def tensorize(
-    df: pl.DataFrame, head: int = 0
-) -> tuple[
+def tensorize(df: pl.DataFrame, head: int = 0) -> tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
