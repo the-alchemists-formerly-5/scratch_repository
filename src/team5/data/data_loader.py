@@ -18,17 +18,19 @@ def tokenize_function(examples):
 # I think we might want to make a new 'column' of data that combines mzs and intensities into "label"
 
 from torch.utils.data import Dataset
+import torch
 
 
 class SMILESDataset(Dataset):
-    def __init__(self, dataframe, tokenizer):
+    def __init__(self, dataframe, tokenizer, max_seq_length):
         self.tokenizer = tokenizer
+        self.max_seq_length = max_seq_length
         self.smiles = dataframe["smiles"].tolist()
         self.precursor_mz = dataframe["precursor_mz"].tolist()
         self.precursor_charge = dataframe["precursor_charge"].tolist()
         self.collision_energy = dataframe["collision_energy"].tolist()
         self.instrument_type = dataframe["instrument_type"].tolist()
-        self.in_silico_label = dataframe["in_silico_label"].tolist()
+        self.in_silico_label = dataframe["in_silico"].tolist()
         self.adduct = dataframe["adduct"].tolist()
         self.compound_class = dataframe["compound_class"].tolist()
         self.mzs = dataframe["mzs"].tolist()
@@ -53,7 +55,7 @@ class SMILESDataset(Dataset):
             smiles,
             truncation=True,
             padding="max_length",
-            max_length=128,
+            max_length=self.max_seq_length,
             return_tensors="pt",
         )
 
