@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 import pytest
 
 from team5.data.data_split import sort_dataframe_by_scaffold, split_dataframe
@@ -11,7 +11,7 @@ def sample_dataframe():
         "scaffold_smiles": ["CCCC", "AAAA", "BBBB", "DDDD", "CCCC"],
         "other_column": [1, 2, 3, 4, 5],
     }
-    return pd.DataFrame(data)
+    return pl.DataFrame(data)
 
 
 def test_sort_dataframe_by_scaffold(sample_dataframe):
@@ -30,7 +30,7 @@ def test_sort_dataframe_by_scaffold(sample_dataframe):
 
 def test_sort_dataframe_by_scaffold_empty():
     """Test the sort_dataframe_by_scaffold function with an empty DataFrame."""
-    empty_df = pd.DataFrame(columns=["scaffold_smiles", "other_column"])
+    empty_df = pl.DataFrame(schema=["scaffold_smiles", "other_column"])
     result = sort_dataframe_by_scaffold(empty_df)
 
     assert len(result) == 0
@@ -63,7 +63,7 @@ def test_split_dataframe_custom_ratio(sample_dataframe):
 
 def test_split_dataframe_empty():
     """Test the split_dataframe function with an empty DataFrame."""
-    empty_df = pd.DataFrame(columns=["scaffold_smiles", "other_column"])
+    empty_df = pl.DataFrame(schema=["scaffold_smiles", "other_column"])
     df_train, df_test = split_dataframe(empty_df)
 
     assert len(df_train) == 0
@@ -74,7 +74,7 @@ def test_split_dataframe_empty():
 
 def test_split_dataframe_single_row():
     """Test the split_dataframe function with a single-row DataFrame."""
-    single_row_df = pd.DataFrame({"scaffold_smiles": ["CCCC"], "other_column": [1]})
+    single_row_df = pl.DataFrame({"scaffold_smiles": ["CCCC"], "other_column": [1]})
     df_train, df_test = split_dataframe(single_row_df, 0.9)
 
     assert len(df_train) == 0
