@@ -4,14 +4,20 @@
 # causing cross contamination and over fitting.
 
 
-def split_data(df):
-    # implement something not random here
-    return train_test_split(df, test_size=0.1, random_state=42)
+def sort_dataframe_by_scaffold(df):
+    """Process the DataFrame to calculate scaffolds and sort."""
+    # Assuming scaffold calculation is already done in the input DataFrame
+    # If not, you'd need to add that logic here
+
+    # Sort the DataFrame by scaffold_smiles
+    df_sorted = df.sort_values(["scaffold_smiles"], ascending=[True])
+
+    return df_sorted
 
 
-# train_df, eval_df = split_data(df)
-
-# train_dataset = SMILESDataset(train_df, tokenizer)
-# eval_dataset = SMILESDataset(eval_df, tokenizer)
-
-## batch?
+def split_dataframe(df, split_ratio=0.9):
+    """Split the DataFrame into two parts based on the given ratio."""
+    split_point = int(len(df) * split_ratio)
+    df_train = df.iloc[:split_point]
+    df_test = df.iloc[split_point:]
+    return df_train, df_test
