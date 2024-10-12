@@ -15,6 +15,10 @@ numpy = "^2.1.2"
 polars = "^1.9.0"
 rdkit = "^2024.3.5"
 matplotlib = "^3.9.2"
+transformers = "^4.45.2"
+simpletransformers = "^0.70.1"
+einops = "^0.8.0"
+peft = "^0.13.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"
