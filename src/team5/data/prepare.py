@@ -93,7 +93,9 @@ PREPARED_PARQUET = "prepared.parquet"
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
     values = dict(
-        enumerate(pl.scan_parquet(parquet).select(column).unique().collect()[column].sort())
+        enumerate(
+            pl.scan_parquet(parquet).select(column).unique().collect()[column].sort()
+        )
     )
     return {v: k for k, v in values.items()}
 
@@ -101,7 +103,7 @@ def _enumerize(parquet: Path, column: str) -> dict[str, int]:
 def interleave(elem: pl.Struct) -> list[float]:
     labels = list(chain.from_iterable(zip(elem["mzs"], elem["intensities"])))
     padding = [0.0] * (MAX_MZS * 2 - len(labels))
-    return labels + padding
+    return labels[: 2 * MAX_MZS] + padding
 
 
 def vectorize(lookup: dict[str, int], elem: str) -> list[int]:
@@ -114,6 +116,10 @@ def tokenize(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer.encode(seq, padding="max_length")
 
 
+def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
+    return tokenizer(seq, padding="max_length")["attention_mask"]
+
+
 def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     print("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
@@ -124,7 +130,11 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     print("Transforming raw data and writing prepared data to disk")
     df.lazy().with_columns(
         tokenized_smiles=pl.col("smiles").map_elements(
-            partial(tokenizer.encode, padding="max_length"), return_dtype=pl.List(pl.Int64)
+            partial(tokenizer.encode, padding="max_length"),
+            return_dtype=pl.List(pl.Int64),
+        ),
+        attention_mask=pl.col("smiles").map_elements(
+            partial(attention_mask, tokenizer), return_dtype=pl.List(pl.Int64)
         ),
         labels=pl.struct(["mzs", "intensities"]).map_elements(
             interleave, return_dtype=pl.List(pl.Float64)
@@ -138,17 +148,19 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     ).select(
         [
             "tokenized_smiles",
+            "attention_mask",
             "labels",
             pl.concat_list(
                 "precursor_mz", "precursor_charge", "enum_in_silico", "enum_adduct"
             ).alias("supplementary_data"),
         ]
-    ).sink_parquet(PREPARED_PARQUET)
+    ).sink_parquet(
+        PREPARED_PARQUET
+    )
 
 
-def tensorize(
-    df: pl.DataFrame, head: int = 0
-) -> tuple[
+def tensorize(df: pl.DataFrame, head: int = 0) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -159,18 +171,20 @@ def tensorize(
     df = pl.read_parquet(PREPARED_PARQUET)
 
     return (
-        torch.Tensor(df["tokenized_smiles"]),
-        torch.Tensor(df["labels"]),
-        torch.Tensor(df["supplementary_data"]),
+        torch.tensor(df["tokenized_smiles"], dtype=torch.long),
+        torch.tensor(df["attention_mask"], dtype=torch.long),
+        torch.tensor(df["labels"], dtype=torch.float),
+        torch.tensor(df["supplementary_data"], dtype=torch.float),
     )
 
 
 if __name__ == "__main__":
     print(f"Only run this way for testing/debugging! This only reads {HEAD} rows.")
-    (tokenized_smiles, labels, supplementary_data) = tensorize(
+    (tokenized_smiles, attention_mask, labels, supplementary_data) = tensorize(
         pl.read_parquet(sys.argv[1]), head=HEAD
     )
 
     print("tokenized_smiles: ", tokenized_smiles)
+    print("attention_mask: ", attention_mask)
     print("labels: ", labels)
     print("supplementary_data: ", supplementary_data)
