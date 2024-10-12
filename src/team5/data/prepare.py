@@ -114,6 +114,10 @@ def tokenize(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer.encode(seq, padding="max_length")
 
 
+def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
+    return tokenizer(seq, padding="max_length")["attention_mask"]
+
+
 def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     print("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
@@ -125,6 +129,9 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     df.lazy().with_columns(
         tokenized_smiles=pl.col("smiles").map_elements(
             partial(tokenizer.encode, padding="max_length"), return_dtype=pl.List(pl.Int64)
+        ),
+        attention_mask=pl.col("smiles").map_elements(
+            partial(attention_mask, tokenizer), return_dtype=pl.List(pl.Int64)
         ),
         labels=pl.struct(["mzs", "intensities"]).map_elements(
             interleave, return_dtype=pl.List(pl.Float64)
@@ -138,6 +145,7 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
     ).select(
         [
             "tokenized_smiles",
+            "attention_mask",
             "labels",
             pl.concat_list(
                 "precursor_mz", "precursor_charge", "enum_in_silico", "enum_adduct"
@@ -152,6 +160,7 @@ def tensorize(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
 ]:
     prepare_data(df, head=head)
 
@@ -159,18 +168,20 @@ def tensorize(
     df = pl.read_parquet(PREPARED_PARQUET)
 
     return (
-        torch.Tensor(df["tokenized_smiles"]),
-        torch.Tensor(df["labels"]),
-        torch.Tensor(df["supplementary_data"]),
+        torch.tensor(df["tokenized_smiles"], dtype=torch.long),
+        torch.tensor(df["attention_mask"], dtype=torch.long),
+        torch.tensor(df["labels"], dtype=torch.float),
+        torch.tensor(df["supplementary_data"], dtype=torch.float),
     )
 
 
 if __name__ == "__main__":
     print(f"Only run this way for testing/debugging! This only reads {HEAD} rows.")
-    (tokenized_smiles, labels, supplementary_data) = tensorize(
+    (tokenized_smiles, attention_mask, labels, supplementary_data) = tensorize(
         pl.read_parquet(sys.argv[1]), head=HEAD
     )
 
     print("tokenized_smiles: ", tokenized_smiles)
+    print("attention_mask: ", attention_mask)
     print("labels: ", labels)
     print("supplementary_data: ", supplementary_data)
