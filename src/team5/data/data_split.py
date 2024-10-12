@@ -7,10 +7,23 @@ import polars as pl
 
 
 def sort_dataframe_by_scaffold(df: pl.DataFrame) -> pl.DataFrame:
-    """Process the DataFrame to calculate scaffolds and sort."""
-    # Sort the DataFrame by scaffold_smiles column
-    df_sorted = df.sort("scaffold_smiles", descending=False)
-    return df_sorted
+    """Sort the DataFrame by the frequency of scaffold_smiles."""
+
+    # Count the occurrences of each scaffold_smiles
+    scaffold_freq = df.group_by("scaffold_smiles").agg(
+        pl.count("scaffold_smiles").alias("frequency")
+    )
+
+    # Join the frequency counts back to the original DataFrame
+    df_with_freq = df.join(scaffold_freq, on="scaffold_smiles")
+
+    # Sort the DataFrame by frequency (descending order) and scaffold_smiles (ascending as secondary sort)
+    df_sorted = df_with_freq.sort(
+        ["frequency", "scaffold_smiles"], descending=[True, False]
+    )
+
+    # Return only the original columns (drop the 'frequency' column)
+    return df_sorted.drop("frequency")
 
 
 def split_dataframe(
