@@ -5,8 +5,12 @@ import itertools
 import polars as pl
 
 
-def _enumerate_column(df: pl.DataFrame, column: str) -> tuple[dict[int, str], dict[str, int]]:
-    val_lookup = dict(enumerate(sorted(set(filter(None, df.select(pl.col(column))[column]))), 1))
+def _enumerate_column(
+    df: pl.DataFrame, column: str
+) -> tuple[dict[int, str], dict[str, int]]:
+    val_lookup = dict(
+        enumerate(sorted(set(filter(None, df.select(pl.col(column))[column]))), 1)
+    )
     key_lookup = {val: key for key, val in val_lookup.items()}
 
     return (val_lookup, key_lookup)
@@ -23,7 +27,9 @@ df = pl.read_parquet("enveda_library_subset.parquet")
 # TODO: scaffold_smiles??
 
 # Max mzs to pad (x2 since we will be interleaving with an equal number of intensities).
-max_mzs = df.with_columns(mzs_len=pl.col("mzs").list.len()).select("mzs_len").max().item() * 2
+max_mzs = (
+    df.with_columns(mzs_len=pl.col("mzs").list.len()).select("mzs_len").max().item() * 2
+)
 print(f"Max number of mzs + intensities: {max_mzs}")
 
 
