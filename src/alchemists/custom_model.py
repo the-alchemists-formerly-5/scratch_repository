@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch
 from torch.nn.functional import cosine_similarity
 from transformers import AutoModel
+from peft import LoraConfig, get_peft_model
 
 class FinalLayers(nn.Module):
     def __init__(self, input_size, max_fragments):
@@ -139,19 +140,29 @@ class CustomChemBERTaModel(nn.Module):
 
         return predicted_output, loss
 
-#MS_model = CustomChemBERTaModel(model, supplementary_data, labels)
+
+from peft import LoraConfig, get_peft_model
+
+peft_config = LoraConfig(
+    r=8,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    target_modules=["key", "query", "value"] # they seem to drop off the "key" often?
+    modules_to_save=["poolers"] # change this to the name of the new modules at the end.
+    bias="none"
+)
+
+
 
 if __name__ == "__main__":
     # Example interleaved lists (padded and converted to tensors)
-    predicted_interleaved = torch.tensor([100, 0.5, 150, 0.8, 0, 0], dtype=torch.float32)  # Example padded vector
-    actual_interleaved = torch.tensor([120, 0.51, 110, 0.81, 100, 0.1], dtype=torch.float32)   # Example padded vector
-
-    # Compute greedy cosine similarity
-    similarity_score = greedy_cosine_similarity_for_interleaved(predicted_interleaved, actual_interleaved)
-    print("Greedy Cosine Similarity (Interleaved):", similarity_score)
 
     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     MS_model = CustomChemBERTaModel(model, 10, 100)
+    peft_model = get_peft_model(MS_model, peft_config)
+    peft_model.print_trainable_parameters() #check that it's training the right things
+
+
     print(MS_model)
 
     for name, param in model.named_parameters():
