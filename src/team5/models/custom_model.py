@@ -57,27 +57,68 @@ class FinalLayers(nn.Module):
 
         return x
 
-def calculate_loss(predicted_output, labels):
-    return greedy_cosine_similarity_for_interleaved(predicted_output, labels)
+def calculate_loss(pred_vec, actual_vec):
+    pred_mzs, pred_intensities = extract_fragments_from_interleaved(pred_vec)
+    actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
+
+    # Convert to tensors and ensure gradients are tracked
+    pred_mzs = torch.tensor(pred_mzs, requires_grad=True)
+    pred_intensities = torch.tensor(pred_intensities, requires_grad=True)
+    actual_mzs = torch.tensor(actual_mzs)
+    actual_intensities = torch.tensor(actual_intensities)
+
+    # Remove zero intensities to avoid division by zero
+    pred_mask = pred_intensities > 0
+    actual_mask = actual_intensities > 0
+
+    pred_mzs = pred_mzs[pred_mask]
+    pred_intensities = pred_intensities[pred_mask]
+    actual_mzs = actual_mzs[actual_mask]
+    actual_intensities = actual_intensities[actual_mask]
+
+    # Compute the Sinkhorn loss
+    loss_value = sinkhorn_loss(pred_mzs, pred_intensities, actual_mzs, actual_intensities)
+
+    return loss_value
+
+
 
 def extract_fragments_from_interleaved(interleaved_vec):
     mzs = interleaved_vec[:, ::2]  # Extract m/z values (even indices across batch)
     intensities = interleaved_vec[:, 1::2]  # Extract intensities (odd indices across batch)
     return mzs, intensities
 
-def greedy_cosine_similarity_for_interleaved(pred_vec, actual_vec):
-    pred_mzs, pred_intensities = extract_fragments_from_interleaved(pred_vec)
-    actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
+def sinkhorn_loss(pred_mzs, pred_intensities, actual_mzs, actual_intensities, epsilon=0.01, num_iters=100):
+    # Normalize intensities to sum to 1 (probability distributions)
+    pred_intensities = pred_intensities / torch.sum(pred_intensities)
+    actual_intensities = actual_intensities / torch.sum(actual_intensities)
 
-    # Since actual_vec is presorted, no need to sort it
-    # Apply cosine similarity along each batch (dim=1)
-    similarity_mzs = torch.abs(cosine_similarity(pred_mzs.float(), actual_mzs.float(), dim=1))
-    similarity_intensities = torch.abs(cosine_similarity(pred_intensities.float(), actual_intensities.float(), dim=1))
+    # Compute the cost matrix (absolute differences in m/z)
+    C = torch.abs(pred_mzs.unsqueeze(1) - actual_mzs.unsqueeze(0))  # Shape: (N_pred, N_actual)
 
-    # Combine similarities
-    similarity = (similarity_mzs + similarity_intensities) / 2
+    # Initialize the kernel matrix
+    K = torch.exp(-C / epsilon)
 
-    return similarity
+    # Initialize dual variables
+    u = torch.ones_like(pred_intensities)
+    v = torch.ones_like(actual_intensities)
+
+    # Small epsilon to prevent division by zero
+    tiny_value = 1e-6
+
+    # Sinkhorn iterations
+    for _ in range(num_iters):
+        u = pred_intensities / (K @ v + tiny_value)
+        v = actual_intensities / (K.T @ u + tiny_value)
+
+    # Compute the transport plan
+    P = torch.diag(u) @ K @ torch.diag(v)
+
+    # Compute the Sinkhorn distance
+    loss_value = torch.sum(P * C)
+
+    return loss_value
+
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim):
