@@ -5,7 +5,6 @@ from torch.nn.functional import cosine_similarity
 from transformers import AutoModel
 from peft import LoraConfig, get_peft_model
 
-
 class FinalLayers(nn.Module):
     def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments):
         super(FinalLayers, self).__init__()
@@ -66,49 +65,19 @@ def extract_fragments_from_interleaved(interleaved_vec):
     intensities = interleaved_vec[:, 1::2]  # Extract intensities (odd indices across batch)
     return mzs, intensities
 
-def sort_two_by_first(arr1, arr2, reverse=True):
-    """
-    Sorts two tensors based on the values of the first tensor,
-    maintaining the corresponding elements of the second tensor in the same order.
-
-    Parameters:
-    - arr1: The tensor to sort by (2D tensor, batch x n values).
-    - arr2: The tensor whose order corresponds to arr1 (2D tensor, batch x n values).
-    - reverse: Boolean indicating whether to sort in descending order (default is True).
-
-    Returns:
-    - Two sorted 2D tensors.
-    """
-    sorted_indices = torch.argsort(arr1, dim=1, descending=reverse)
-    arr1_sorted = torch.gather(arr1, 1, sorted_indices)
-    arr2_sorted = torch.gather(arr2, 1, sorted_indices)
-    return arr1_sorted, arr2_sorted
-
 def greedy_cosine_similarity_for_interleaved(pred_vec, actual_vec):
-    pred_mzs, pred_intentensities = extract_fragments_from_interleaved(pred_vec)
+    pred_mzs, pred_intensities = extract_fragments_from_interleaved(pred_vec)
     actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
 
-    sorted_pred_mzs, sorted_pred_intensities = sort_two_by_first(pred_mzs, pred_intentensities)
-    sorted_actual_mzs, sorted_actual_intensities = sort_two_by_first(actual_mzs, actual_intensities)
-
+    # Since actual_vec is presorted, no need to sort it
     # Apply cosine similarity along each batch (dim=1)
-    similarity_mzs_1 = torch.abs(cosine_similarity(sorted_pred_mzs.float(), sorted_actual_mzs.float(), dim=1))
-    similarity_intensities_1 = torch.abs(cosine_similarity(sorted_pred_intensities.float(), sorted_actual_intensities.float(), dim=1))
+    similarity_mzs = torch.abs(cosine_similarity(pred_mzs.float(), actual_mzs.float(), dim=1))
+    similarity_intensities = torch.abs(cosine_similarity(pred_intensities.float(), actual_intensities.float(), dim=1))
 
-    similarity_1 = (similarity_mzs_1 + similarity_intensities_1) / 2
+    # Combine similarities
+    similarity = (similarity_mzs + similarity_intensities) / 2
 
-    sorted_pred_intensities, sorted_pred_mzs = sort_two_by_first(pred_intentensities, pred_mzs)
-    sorted_actual_intensities, sorted_actual_mzs = sort_two_by_first(actual_intensities, actual_mzs)
-
-    similarity_mzs_2 = torch.abs(cosine_similarity(sorted_pred_mzs.float(), sorted_actual_intensities.float(), dim=1))
-    similarity_intensities_2 = torch.abs(cosine_similarity(sorted_pred_intensities.float(), sorted_actual_mzs.float(), dim=1))
-
-    similarity_2 = (similarity_mzs_2 + similarity_intensities_2) / 2
-
-    # Return the maximum similarity for each batch
-    return torch.max(similarity_1, similarity_2)
-
-
+    return similarity
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim):
@@ -143,7 +112,7 @@ class CustomChemBERTaModel(nn.Module):
         # state = torch.cat([flatten_hidden_state, supplementary_data], dim=1)
 
         # Pass through the final layers
-        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, 2 * max_fragments]
+        predicted_output = self.final_layers(last_hidden_state, supplementary_data, )  # Shape: [batch_size, 2 * max_fragments]
 
         # Drop singular dimensions
         predicted_output = predicted_output.squeeze()
