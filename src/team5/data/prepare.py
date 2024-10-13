@@ -120,7 +120,9 @@ def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer(seq, padding="max_length")["attention_mask"]
 
 
-def prepare_data(df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET) -> None:
+def prepare_data(
+    df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET
+) -> None:
     print("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
