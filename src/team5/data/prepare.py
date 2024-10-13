@@ -88,7 +88,7 @@ ADDUCT = {
     "[M-H]-": 71,
 }
 
-PREPARED_PARQUET = "prepared.parquet"
+PREPARED_PARQUET = "prepared"
 
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
@@ -165,7 +165,7 @@ def tensorize(df: pl.DataFrame, head: int = 0, split: str = "train") -> tuple[
     torch.Tensor,
     torch.Tensor,
 ]:
-    filename = PREPARED_PARQUET.with_suffix(f"_{split}.parquet")
+    filename = Path(f"{PREPARED_PARQUET}_{split}.parquet")
     if not filename.exists():
         prepare_data(df, head=head, filename=filename)
     else:
