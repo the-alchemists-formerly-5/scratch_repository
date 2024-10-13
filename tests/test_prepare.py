@@ -49,7 +49,9 @@ def test_interleave_more_than_max_elements():
     input_struct = mock_struct(mzs, intensities)
     result = interleave(input_struct)
     sorted_mzs, sorted_intensities = zip(*sorted(zip(mzs, intensities), reverse=True))
-    expected = list(chain.from_iterable(zip(sorted_mzs[:MAX_MZS], sorted_intensities[:MAX_MZS])))
+    expected = list(
+        chain.from_iterable(zip(sorted_mzs[:MAX_MZS], sorted_intensities[:MAX_MZS]))
+    )
     assert result == expected
     assert len(result) == MAX_MZS * 2
 
@@ -123,4 +125,4 @@ def test_vectorize_non_int_values_in_lookup():
 
 
 if __name__ == "__main__":
-    pytest.main(['-s'])
+    pytest.main(["-s"])
