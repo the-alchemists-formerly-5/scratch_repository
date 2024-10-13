@@ -59,8 +59,7 @@ class FinalLayers(nn.Module):
         return x
 
 def calculate_loss(predicted_output, labels):
-    # return greedy_cosine_similarity_for_interleaved(predicted_output, labels)
-    return nn.MSELoss()(predicted_output, labels)
+    return greedy_cosine_similarity_for_interleaved(predicted_output, labels)
 
 def extract_fragments_from_interleaved(interleaved_vec):
     mzs = interleaved_vec[:, ::2]  # Extract m/z values (even indices across batch)
