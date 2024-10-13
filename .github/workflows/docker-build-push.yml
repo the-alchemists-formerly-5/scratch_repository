@@ -25,7 +25,7 @@ jobs:
         with:
           release-type: simple
           package-name: team5_model
-          
+
   build-and-push:
     needs: release-please
     runs-on: ubuntu-latest
