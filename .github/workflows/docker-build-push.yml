@@ -28,9 +28,9 @@ jobs:
       id: get_version
       run: |
         if [ "${{ github.event_name }}" == "pull_request" ]; then
-          echo "::set-output name=version::$(echo ${GITHUB_HEAD_REF} | sed 's/[^a-zA-Z0-9]/-/g')"
+          echo "version=$(echo ${GITHUB_HEAD_REF} | sed 's/[^a-zA-Z0-9]/-/g')" >> $GITHUB_OUTPUT
         else
-          echo "::set-output name=version::$(echo ${GITHUB_SHA} | cut -c1-7)"
+          echo "version=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
         fi
 
     - name: Build and push Docker image
