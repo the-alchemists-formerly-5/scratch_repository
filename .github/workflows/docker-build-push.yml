@@ -1,4 +1,4 @@
-name: Docker Build and Push
+name: Release and Docker Build
 
 on:
   push:
@@ -9,7 +9,20 @@ on:
       - main
 
 jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: google-github-actions/release-please-action@v4
+        id: release
+        with:
+          release-type: simple
+          package-name: team5_model
+          
   build-and-push:
+    needs: release-please
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -18,12 +31,7 @@ jobs:
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@main
       with:
-        # this might remove tools that are actually needed,
-        # if set to "true" but frees about 6 GB
         tool-cache: false
-
-        # all of these default to true, but feel free to set to
-        # "false" if necessary for your workflow
         android: true
         dotnet: true
         haskell: true
@@ -40,10 +48,12 @@ jobs:
         username: ${{ vars.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Get branch name or commit hash
+    - name: Get version
       id: get_version
       run: |
-        if [ "${{ github.event_name }}" == "pull_request" ]; then
+        if [[ "${{ needs.release-please.outputs.release_created }}" == "true" ]]; then
+          echo "version=${{ needs.release-please.outputs.tag_name }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
           echo "version=$(echo ${GITHUB_HEAD_REF} | sed 's/[^a-zA-Z0-9]/-/g')" >> $GITHUB_OUTPUT
         else
           echo "version=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
@@ -56,11 +66,9 @@ jobs:
         file: docker/Dockerfile.base
         push: true
         tags: |
-          ghiret/hackathon_bio:model_image-v1.0.0-${{ steps.get_version.outputs.version }}
+          ghiret/hackathon_bio:model_image-${{ steps.get_version.outputs.version }}
           ghiret/hackathon_bio:model_image-latest
-        # Add build arguments if needed to optimize the build
         build-args: |
           BUILDKIT_INLINE_CACHE=1
-        # Enable BuildKit cache
         cache-from: type=registry,ref=ghiret/hackathon_bio:model_image-buildcache
         cache-to: type=registry,ref=ghiret/hackathon_bio:model_image-buildcache,mode=max
