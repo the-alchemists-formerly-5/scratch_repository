@@ -35,7 +35,7 @@ Follow these steps to clone the scratch_repository from GitHub to your local mac
    Once connected:
    ```
    cd /workspace
-   tar -xzf scratch_repository.tar.gz
+   tar -xzf scratch_repository.tar.gz --overwrite
    rm scratch_repository.tar.gz
    ```
 
