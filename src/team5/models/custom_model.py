@@ -18,7 +18,6 @@ class FinalLayers(nn.Module):
         self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 2)
         self.activation2 = nn.ReLU()
         self.dropout2 = nn.Dropout(0.1)
-        self.layernorm2 = nn.LayerNorm(2)
 
 
     def forward(self, x, supplementary_data, attention_mask):
@@ -49,7 +48,6 @@ class FinalLayers(nn.Module):
         # (b, max_fragments, h+75) -> (b, max_fragments, 2)
         x = self.layer2(x)
         x = self.dropout2(x)
-        x = self.layernorm2(x)
         x = self.activation2(x)
 
         # (b, max_fragments, 2) -> (b, 1, max_fragments * 2)
