@@ -110,7 +110,7 @@ class CustomChemBERTaModel(nn.Module):
         # state = torch.cat([flatten_hidden_state, supplementary_data], dim=1)
 
         # Pass through the final layers
-        predicted_output = self.final_layers(last_hidden_state, supplementary_data, )  # Shape: [batch_size, 2 * max_fragments]
+        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, 2 * max_fragments]
 
         # Drop singular dimensions
         predicted_output = predicted_output.squeeze()
