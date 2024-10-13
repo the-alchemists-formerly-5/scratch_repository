@@ -20,6 +20,10 @@ data/external/
 # Models
 models/
 
+# Logs
+logs/
+notebooks/wandb/
+
 # IDE
 .vscode/
 .idea/
