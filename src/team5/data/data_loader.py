@@ -1,7 +1,9 @@
 import polars as pl
-from src.team5.data.data_split import sort_dataframe_by_scaffold, split_dataframe
-from src.team5.data.prepare import tensorize
 from torch.utils.data import Dataset
+
+from src.team5.data.data_split import (sort_dataframe_by_scaffold,
+                                       split_dataframe)
+from src.team5.data.prepare import tensorize
 
 
 class SMILESDataset(Dataset):
@@ -14,7 +16,7 @@ class SMILESDataset(Dataset):
 
     def __len__(self):
         return len(self.tokenized_smiles)
-    
+
     def __getitem__(self, idx):
         tokenized_smiles = self.tokenized_smiles[idx]
         attention_mask = self.attention_mask[idx]
@@ -25,8 +27,9 @@ class SMILESDataset(Dataset):
             "input_ids": tokenized_smiles,
             "attention_mask": attention_mask,
             "labels": label,
-            "supplementary_data": supplementary_data
+            "supplementary_data": supplementary_data,
         }
+
 
 if __name__ == "__main__":
     print(f"Loading the data!.")
