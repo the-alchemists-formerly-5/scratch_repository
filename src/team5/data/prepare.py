@@ -102,6 +102,8 @@ def _enumerize(parquet: Path, column: str) -> dict[str, int]:
 
 def interleave(elem: pl.Struct) -> list[float]:
     # Sort mzs, and then sort intensities to the same order
+    if len(elem["mzs"]) == 0:
+        return [0.0] * (MAX_MZS * 2)
     sorted_mzs, sorted_intensities = zip(*sorted(zip(elem["mzs"], elem["intensities"]), reverse=True))
     labels = list(chain.from_iterable(zip(sorted_mzs, sorted_intensities)))
     padding = [0.0] * (MAX_MZS * 2 - len(labels))
