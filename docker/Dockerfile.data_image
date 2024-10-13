@@ -13,7 +13,7 @@ COPY data/raw/enveda_library_subset.parquet /app/data/enveda_library_subset.parq
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHON_VERSION=3.12
+ENV PYTHON_VERSION=3.11
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
