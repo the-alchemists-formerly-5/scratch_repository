@@ -14,7 +14,7 @@ def mock_struct(mzs, intensities):
 def test_interleave_normal_case():
     input_struct = mock_struct([1.0, 2.0, 3.0], [100.0, 200.0, 300.0])
     result = interleave(input_struct)
-    expected = [1.0, 100.0, 2.0, 200.0, 3.0, 300.0] + [0.0] * (MAX_MZS * 2 - 6)
+    expected = [3.0, 300.0, 2.0, 200.0, 1.0, 100.0] + [0.0] * (MAX_MZS * 2 - 6)
     assert result == expected
 
 
@@ -37,7 +37,8 @@ def test_interleave_max_elements():
     intensities = [float(i * 100) for i in range(MAX_MZS)]
     input_struct = mock_struct(mzs, intensities)
     result = interleave(input_struct)
-    expected = list(chain.from_iterable(zip(mzs, intensities)))
+    sorted_mzs, sorted_intensities = zip(*sorted(zip(mzs, intensities), reverse=True))
+    expected = list(chain.from_iterable(zip(sorted_mzs, sorted_intensities)))
     assert result == expected
     assert len(result) == MAX_MZS * 2
 
@@ -47,7 +48,8 @@ def test_interleave_more_than_max_elements():
     intensities = [float(i * 100) for i in range(MAX_MZS + 1)]
     input_struct = mock_struct(mzs, intensities)
     result = interleave(input_struct)
-    expected = list(chain.from_iterable(zip(mzs[:MAX_MZS], intensities[:MAX_MZS])))
+    sorted_mzs, sorted_intensities = zip(*sorted(zip(mzs, intensities), reverse=True))
+    expected = list(chain.from_iterable(zip(sorted_mzs[:MAX_MZS], sorted_intensities[:MAX_MZS])))
     assert result == expected
     assert len(result) == MAX_MZS * 2
 
@@ -56,7 +58,7 @@ def test_interleave_uneven_inputs():
     input_struct = mock_struct([1.0, 2.0, 3.0], [100.0, 200.0])
 
     result = interleave(input_struct)
-    expected = [1.0, 100.0, 2.0, 200.0] + [0.0] * (MAX_MZS * 2 - 4)
+    expected = [2.0, 200.0, 1.0, 100.0] + [0.0] * (MAX_MZS * 2 - 4)
     assert result == expected
     assert len(result) == MAX_MZS * 2
 
@@ -121,4 +123,4 @@ def test_vectorize_non_int_values_in_lookup():
 
 
 if __name__ == "__main__":
-    pytest.main()
+    pytest.main(['-s'])

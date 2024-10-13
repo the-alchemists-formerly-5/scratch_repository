@@ -18,7 +18,6 @@ class FinalLayers(nn.Module):
         self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 2)
         self.activation2 = nn.ReLU()
         self.dropout2 = nn.Dropout(0.1)
-        self.layernorm2 = nn.LayerNorm(2)
 
 
     def forward(self, x, supplementary_data, attention_mask):
@@ -49,7 +48,6 @@ class FinalLayers(nn.Module):
         # (b, max_fragments, h+75) -> (b, max_fragments, 2)
         x = self.layer2(x)
         x = self.dropout2(x)
-        x = self.layernorm2(x)
         x = self.activation2(x)
 
         # (b, max_fragments, 2) -> (b, 1, max_fragments * 2)
@@ -153,7 +151,7 @@ class CustomChemBERTaModel(nn.Module):
         # state = torch.cat([flatten_hidden_state, supplementary_data], dim=1)
 
         # Pass through the final layers
-        predicted_output = self.final_layers(last_hidden_state, supplementary_data, )  # Shape: [batch_size, 2 * max_fragments]
+        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, 2 * max_fragments]
 
         # Drop singular dimensions
         predicted_output = predicted_output.squeeze()
