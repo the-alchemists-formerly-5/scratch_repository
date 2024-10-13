@@ -20,6 +20,7 @@ simpletransformers = "^0.70.1"
 einops = "^0.8.0"
 peft = "^0.13.2"
 evaluate = "^0.4.3"
+accelerate = "^1.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"
