@@ -120,7 +120,7 @@ def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer(seq, padding="max_length")["attention_mask"]
 
 
-def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
+def prepare_data(df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET) -> None:
     print("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
@@ -155,20 +155,24 @@ def prepare_data(df: pl.DataFrame, head: int = 0) -> None:
             ).alias("supplementary_data"),
         ]
     ).sink_parquet(
-        PREPARED_PARQUET
+        filename
     )
 
 
-def tensorize(df: pl.DataFrame, head: int = 0) -> tuple[
+def tensorize(df: pl.DataFrame, head: int = 0, split: str = "train") -> tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
 ]:
-    prepare_data(df, head=head)
+    filename = PREPARED_PARQUET.with_suffix(f"_{split}.parquet")
+    if not filename.exists():
+        prepare_data(df, head=head, filename=filename)
+    else:
+        print(f"Prepared data already exists for {split} split, skipping")
 
-    print("Reading prepared data from disk")
-    df = pl.read_parquet(PREPARED_PARQUET)
+    print(f"Reading prepared data from disk ({filename})")
+    df = pl.read_parquet(filename)
 
     return (
         torch.tensor(df["tokenized_smiles"], dtype=torch.long),
