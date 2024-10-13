@@ -14,16 +14,19 @@ class FinalLayers(nn.Module):
         self.layer1 = nn.Linear(max_seq_length, 512)
         self.activation1 = nn.ReLU()
         self.dropout1 = nn.Dropout(0.1)
+        self.layernorm1 = nn.LayerNorm(512)
         self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 2)
         self.activation2 = nn.ReLU()
         self.dropout2 = nn.Dropout(0.1)
-        self.layer3 = nn.Linear(2 * 512, 2 * self.max_fragments)
-        self.activation3 = nn.ReLU()
-        self.dropout3 = nn.Dropout(0.1)
+        self.layernorm2 = nn.LayerNorm(2)
+        # self.layer3 = nn.Linear(2 * 512, 2 * self.max_fragments)
+        # self.activation3 = nn.ReLU()
+        # self.dropout3 = nn.Dropout(0.1)
+        # self.layernorm3 = nn.LayerNorm(2 * self.max_fragments)
 
     def forward(self, x, supplementary_data):
         # (b, s, h) -> (b, h, s)
-        x_transposed = einops.rearrange(x, 'b s h -> b h s')
+        x = einops.rearrange(x, 'b s h -> b h s')
 
         # Supplementary data is a list of [b, 75] floats, explode it to [b, 75, 128]
         supplementary_data = einops.repeat(supplementary_data, 'b d -> b d s', s=x.shape[2])
@@ -31,26 +34,29 @@ class FinalLayers(nn.Module):
         # (b, h, s) -> (b, h + 75, s)
         x = torch.cat([x, supplementary_data], dim=1)
 
-        # (b, h, s) -> (b, h, max_fragments)
-        x = self.layer1(x_transposed)
+        # (b, h + 75, s) -> (b, h + 75, max_fragments)
+        x = self.layer1(x)
         x = self.dropout1(x)
+        x = self.layernorm1(x)
         x = self.activation1(x)
 
         # (b, h+75, max_fragments) -> (b, max_fragments, h+75)
-        x_transposed = einops.rearrange(x, 'b h s -> b s h')
+        x = einops.rearrange(x, 'b h s -> b s h')
 
         # (b, max_fragments, h+75) -> (b, max_fragments, 2)
-        x = self.layer2(x_transposed)
+        x = self.layer2(x)
         x = self.dropout2(x)
+        x = self.layernorm2(x)
         x = self.activation2(x)
 
         # (b, max_fragments, 2) -> (b, 1, max_fragments * 2)
         x = einops.rearrange(x, 'b s h -> b 1 (s h)')
 
-        # 1024 x 1 -> (2 * max_fragments) x 1
-        x = self.layer3(x)
-        x = self.dropout3(x)
-        x = self.activation3(x)
+        # # 1024 x 1 -> (2 * max_fragments) x 1
+        # x = self.layer3(x)
+        # x = self.dropout3(x)
+        # x = self.layernorm3(x)
+        # x = self.activation3(x)
 
         return x
 
