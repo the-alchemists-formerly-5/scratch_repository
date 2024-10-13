@@ -1,0 +1,39 @@
+# Start with a lightweight base image compatible with Intel architecture
+FROM --platform=linux/amd64 ubuntu:22.04
+
+# Set the working directory in the container
+WORKDIR /app
+# List contents of the build context for debugging
+RUN ls -R /
+
+# Create the data directory
+RUN mkdir -p /app/data
+# Copy the large Parquet file into the image
+COPY data/raw/enveda_library_subset.parquet /app/data/enveda_library_subset.parquet
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHON_VERSION=3.11
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-distutils \
+    python${PYTHON_VERSION}-venv \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.12 as the default python version
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python /usr/bin/python${PYTHON_VERSION}
+
+# Create and activate a virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
