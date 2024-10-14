@@ -16,7 +16,7 @@ class FinalLayers(nn.Module):
         self.activation1 = nn.ReLU()
         self.dropout1 = nn.Dropout(0.1)
         self.layernorm1 = nn.LayerNorm(512)
-        self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 2)
+        self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 3)
         self.activation2 = nn.ReLU()
         self.dropout2 = nn.Dropout(0.1)
 
@@ -46,15 +46,28 @@ class FinalLayers(nn.Module):
         # (b, h+75, max_fragments) -> (b, max_fragments, h+75)
         x = einops.rearrange(x, 'b h s -> b s h')
 
-        # (b, max_fragments, h+75) -> (b, max_fragments, 2)
+        # (b, max_fragments, h+75) -> (b, max_fragments, 3)
         x = self.layer2(x)
         x = self.dropout2(x)
         x = self.activation2(x)
 
-        # (b, max_fragments, 2) -> (b, 1, max_fragments * 2)
-        x = einops.rearrange(x, 'b s h -> b 1 (s h)')
+                # Apply sigmoid to the third number (flags) to get values near 0 or 1
+        mzs = x[:, :, 0]  # First number (labels)
+        probs = x[:, :, 1]   # Second number (probs)
+        flags = x[:, :, 2]   # Third number (flags)
 
-        return x
+        flags = torch.sigmoid(flags)  # Apply sigmoid to flags
+
+        # Multiply the first number (labels) by the flag
+        mzs = mzs * flags
+
+        # Adjust the second number (probs) to be very negative where the flag is 0
+        probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
+
+        # Apply softmax to the adjusted probabilities along the fragment dimension
+        probs = torch.softmax(probs, dim=1)
+
+        return mzs, probs, flags
 
 def extract_fragments_from_interleaved(interleaved_vec):
     mzs = interleaved_vec[:, ::2]  # Extract m/z values (even indices across batch)
@@ -67,8 +80,8 @@ def extract_predictions(interleaved_vec):
     flag = interleaved_vec[:, 2::3]  # Extract flag (odd indices across batch)
     return mzs, intensities, flag
 
-def calculate_loss(pred_vec, actual_vec):
-    pred_mzs, pred_probabilities, flag = extract_predictions(pred_vec)
+def calculate_loss(predictions, actual_vec):
+    pred_mzs, pred_probabilities, flag = predictions
     actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
 
     # normalise actual_intensities by dividing by the sum along dim 1
@@ -149,9 +162,6 @@ class CustomChemBERTaModel(nn.Module):
 
         # Pass through the final layers
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, 2 * max_fragments]
-
-        # Drop singular dimensions
-        predicted_output = predicted_output.squeeze()
 
         # Calculate the loss by comparing to labels
         loss = calculate_loss(predicted_output, labels)
