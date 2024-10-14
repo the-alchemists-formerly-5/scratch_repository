@@ -56,98 +56,63 @@ class FinalLayers(nn.Module):
 
         return x
 
-def calculate_loss(pred_vec, actual_vec):
-    
-    pred_mzs, pred_intensities = extract_fragments_from_interleaved(pred_vec)
-    actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
-    
-
-    # Compute the KL divergence approximation
-    loss_value = kl_divergence_approximation(pred_mzs, pred_intensities, actual_mzs, actual_intensities)
-
-    return loss_value
-
-
-def kl_divergence_approximation(pred_mzs, pred_intensities, actual_mzs, actual_intensities, sigma=2.0, min_mz=0., max_mz=5000., num_points=5000, epsilon=1e-8):
-    # Create a range of points to evaluate the distributions
-    x = torch.linspace(min_mz, max_mz, num_points).to(pred_mzs.device)
-
-    # print()
-    # print('pred_mzs', torch.min(pred_mzs), torch.max(pred_mzs), torch.mean(pred_mzs))
-    # print('pred_intensities', torch.min(pred_intensities), torch.max(pred_intensities), torch.mean(pred_intensities))
-    # print('actual_mzs', torch.min(actual_mzs), torch.max(actual_mzs), torch.mean(actual_mzs))
-    # print('actual_intensities', torch.min(actual_intensities), torch.max(actual_intensities), torch.mean(actual_intensities))
-    # print()
-
-    # 2. Create continuous probability distributions
-    def create_distribution(mzs, probs):
-        # Expand dimensions for broadcasting
-        x_expanded = x.unsqueeze(0).unsqueeze(1)  # [1, 1, num_points]
-        mzs_expanded = mzs.unsqueeze(2)  # [batch_size, num_fragments, 1]
-        probs_expanded = probs.unsqueeze(2)  # [batch_size, num_fragments, 1]
-        
-        # Calculate Gaussian contributions
-        gauss = torch.exp(-0.5 * ((x_expanded - mzs_expanded) / sigma)**2)
-        dist = torch.sum(gauss * probs_expanded, dim=1)  # Sum over fragments
-
-        # Normalize the distribution
-        dist = dist / torch.sum(dist, dim=1, keepdim=True)
-        return dist
-
-    pred_dist = create_distribution(pred_mzs, pred_intensities) + epsilon
-    actual_dist = create_distribution(actual_mzs, actual_intensities) + epsilon
-
-    # print('pred_dist', torch.min(pred_dist), torch.max(pred_dist), torch.mean(pred_dist))
-    # print('pred_dist.log()', torch.min(pred_dist.log()), torch.max(pred_dist.log()), torch.mean(pred_dist.log()))
-    # print('actual_dist', torch.min(actual_dist), torch.max(actual_dist), torch.mean(actual_dist))
-
-    # 3. Calculate KL divergence
-    kl_div = F.kl_div(pred_dist.log(), actual_dist, reduction='batchmean', log_target=False)
-
-    # print('kl_div', kl_div)
-    # print()
-    # print()
-    # print(kl_div)
-
-    return kl_div
-
-
 def extract_fragments_from_interleaved(interleaved_vec):
     mzs = interleaved_vec[:, ::2]  # Extract m/z values (even indices across batch)
     intensities = interleaved_vec[:, 1::2]  # Extract intensities (odd indices across batch)
     return mzs, intensities
 
+def extract_predictions(interleaved_vec):
+    mzs = interleaved_vec[:, ::3]  # Extract m/z values (even indices across batch)
+    intensities = interleaved_vec[:, 1::3]  # Extract intensities (odd indices across batch)
+    flag = interleaved_vec[:, 2::3]  # Extract flag (odd indices across batch)
+    return mzs, intensities, flag
 
-def sinkhorn_loss(pred_mzs, pred_intensities, actual_mzs, actual_intensities, epsilon=100, num_iters=1):
-    # Normalize intensities to sum to 1 (probability distributions)
-    pred_intensities = pred_intensities / torch.sum(pred_intensities)
-    actual_intensities = actual_intensities / torch.sum(actual_intensities)
+def calculate_loss(pred_vec, actual_vec):
+    pred_mzs, pred_probabilities, flag = extract_predictions(pred_vec)
+    actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
 
-    # Compute the cost matrix (absolute differences in m/z)
-    C = torch.abs(pred_mzs.unsqueeze(1) - actual_mzs.unsqueeze(0))  # Shape: (N_pred, N_actual)
-    
-    # Initialize the kernel matrix
-    K = torch.exp(-C / epsilon)
+    # normalise actual_intensities by dividing by the sum along dim 1
+    actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
 
-    # Initialize dual variables
-    u = torch.ones_like(pred_intensities)
-    v = torch.ones_like(actual_intensities)
+    return gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, pred_mzs, pred_probabilities)
 
-    # Small epsilon to prevent division by zero
-    tiny_value = 1e-6
 
-    # Sinkhorn iterations
-    for _ in range(num_iters):
-        u = pred_intensities / (K @ v + tiny_value)
-        v = actual_intensities / (K.T @ u + tiny_value)
+def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
+    """
+    Computes the cross-entropy loss between the actual and predicted distributions using
+    Gaussian kernel density estimation with the log-sum-exp trick for numerical stability.
 
-    # Compute the transport plan
-    P = torch.diag(u) @ K @ torch.diag(v)
+    Parameters:
+    - actual_mzs: Tensor of shape (B, N_actual)
+    - actual_probabilities: Tensor of shape (B, N_actual)
+    - predicted_mzs: Tensor of shape (B, N_pred)
+    - predicted_probabilities: Tensor of shape (B, N_pred)
+    - sigma: Standard deviation of the Gaussian kernel (default: 1.0)
 
-    # Compute the Sinkhorn distance
-    loss_value = torch.sum(P * C)
+    Returns:
+    - loss: Scalar tensor representing the cross-entropy loss
+    """
+    # Ensure the predicted probabilities are not zero to avoid log of zero
+    epsilon = 1e-10
+    predicted_probabilities = predicted_probabilities.clamp(min=epsilon)
 
-    return loss_value
+
+    # Compute the squared differences divided by sigma
+    D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / sigma
+
+    # Compute the log of predicted probabilities and reshape for broadcasting
+    log_predicted_probs = torch.log(predicted_probabilities).unsqueeze(1)
+
+    # Compute the terms inside the log-sum-exp
+    terms = log_predicted_probs - D
+
+    # Apply the log-sum-exp trick along the predicted mzs axis
+    log_p_predicted = torch.logsumexp(terms, dim=2)
+
+    # Compute the cross-entropy loss
+    loss = -torch.sum(actual_probabilities * log_p_predicted, dim=1)
+
+    return loss
 
 
 class CustomChemBERTaModel(nn.Module):
