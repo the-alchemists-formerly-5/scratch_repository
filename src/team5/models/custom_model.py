@@ -5,6 +5,8 @@ from torch.nn.functional import cosine_similarity
 from transformers import AutoModel
 from peft import LoraConfig, get_peft_model
 import torch.nn.functional as F
+from matchms import Spectrum
+from matchms.similarity import CosineGreedy, CosineHungarian
 
 class FinalLayers(nn.Module):
     def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments):
@@ -159,6 +161,126 @@ class CustomChemBERTaModel(nn.Module):
         loss = calculate_loss(predicted_output, labels)
 
         return loss, predicted_output
+    
+    def evaluate_spectra(self, predicted_output, interleaved_labels, threshold=0.5):
+        """
+        Evaluate spectra using greedy cosine and hungarian cosine metrics, processing both 
+        the predicted output and the interleaved labels to extract m/z values and intensities.
+        
+        Parameters:
+        - predicted_output: Tuple (pred_mz, pred_probs, pred_flags)
+        - interleaved_labels: Ground truth in interleaved format (m/z and intensities)
+        - threshold: A cutoff value for flags to zero out certain predictions.
+        
+        Returns:
+        - A dictionary with the greedy and Hungarian cosine scores.
+        """
+
+        # Step 1: Process the predicted output
+        pred_mz, pred_intensities = process_predicted_output(predicted_output, threshold)
+
+        # Step 2: Extract the ground truth m/z and intensities from interleaved labels
+        mz_true, intensities_true = extract_fragments_from_interleaved(interleaved_labels)
+
+        # Step 3: Calculate the metrics using the processed predicted and ground truth values
+        greedy_score = greedy_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
+        hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
+
+        return {
+            'greedy_cosine': greedy_score,
+            'hungarian_cosine': hungarian_score
+        }    
+
+
+def process_predicted_output(predicted_output):
+    """
+    Processes the predicted output to extract m/z values and intensities.
+    
+    Parameters:
+    - predicted_output: Tuple containing predicted m/z, predicted probabilities (for intensities), and flags
+    - threshold: A cutoff value for the flags. If flag > threshold, the corresponding m/z and intensity are set to zero.
+    
+    Returns:
+    - pred_mz: Processed predicted m/z values
+    - pred_intensities: Normalized predicted intensities
+    """
+    pred_mz, pred_probs, pred_flags = predicted_output
+
+    # Apply the threshold: if flag > 0.5, keep values, else zero them out
+    mask = (pred_flags > 0.5).float()
+
+    # Set values to zero where the flag is below the threshold
+    pred_mz = pred_mz * mask
+    pred_probs = pred_probs * mask
+
+    # Renormalize the predicted intensities (pred_probs) so the maximum is 1
+    max_intensity = torch.max(pred_probs, dim=1, keepdim=True).values
+    pred_intensities = torch.where(max_intensity > 0, pred_probs / max_intensity, torch.zeros_like(pred_probs))
+    
+    return pred_mz, pred_intensities
+
+
+def create_spectrum(mz, intensities):
+    """
+    Create a Spectrum object from m/z values and intensities for use in matchms.
+    
+    Parameters:
+    - mz: m/z values
+    - intensities: Intensity values
+    
+    Returns:
+    - spectrum: A matchms Spectrum object
+    """
+    metadata = {}  # You can populate this with any relevant metadata if necessary
+    return Spectrum(mz=mz.cpu().numpy(), intensities=intensities.cpu().numpy(), metadata=metadata)
+
+def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
+    """
+    Use CosineGreedy from matchms to calculate greedy cosine similarity between two spectra.
+    
+    Parameters:
+    - mz_a: m/z values for spectrum A
+    - mz_b: m/z values for spectrum B
+    - intensities_a: Intensity values for spectrum A
+    - intensities_b: Intensity values for spectrum B
+    
+    Returns:
+    - similarity: CosineGreedy similarity score
+    """
+    # Create Spectrum objects
+    spectrum_a = create_spectrum(mz_a, intensities_a)
+    spectrum_b = create_spectrum(mz_b, intensities_b)
+
+    # Instantiate the CosineGreedy similarity function
+    cosine_greedy = CosineGreedy(tolerance=0.1)  # Adjust tolerance as needed
+
+    # Compute the similarity score
+    score, _ = cosine_greedy.pair(spectrum_a, spectrum_b)
+    return score
+
+def hungarian_cosine(mz_a, mz_b, intensities_a, intensities_b):
+    """
+    Use CosineHungarian from matchms to calculate Hungarian cosine similarity between two spectra.
+    
+    Parameters:
+    - mz_a: m/z values for spectrum A
+    - mz_b: m/z values for spectrum B
+    - intensities_a: Intensity values for spectrum A
+    - intensities_b: Intensity values for spectrum B
+    
+    Returns:
+    - similarity: CosineHungarian similarity score
+    """
+    # Create Spectrum objects
+    spectrum_a = create_spectrum(mz_a, intensities_a)
+    spectrum_b = create_spectrum(mz_b, intensities_b)
+
+    # Instantiate the CosineHungarian similarity function
+    cosine_hungarian = CosineHungarian(tolerance=0.1)  # Adjust tolerance as needed
+
+    # Compute the similarity score
+    score, _ = cosine_hungarian.pair(spectrum_a, spectrum_b)
+    return score
 
 
 
