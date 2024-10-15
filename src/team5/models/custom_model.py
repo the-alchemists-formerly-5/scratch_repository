@@ -125,6 +125,8 @@ def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs,
     # Compute the cross-entropy loss
     loss = -torch.sum(actual_probabilities * log_p_predicted, dim=1)
 
+    loss = loss.mean()
+
     return loss
 
 
@@ -151,17 +153,7 @@ class CustomChemBERTaModel(nn.Module):
         # Extract last hidden state (embeddings)
         last_hidden_state = outputs.hidden_states[-1]  
 
-        # Pad the hidden state to max_seq_length
-        # padded_hidden_state = nn.functional.pad(last_hidden_state, (0, 0, 0, self.max_seq_length - last_hidden_state.shape[1]))
-        
-        # Flatten the padded hidden state
-        # flatten_hidden_state = einops.rearrange(padded_hidden_state, 'b s h -> b (s h)')
-
-        # Concatenate with supplementary data
-        # state = torch.cat([flatten_hidden_state, supplementary_data], dim=1)
-
-        # Pass through the final layers
-        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, 2 * max_fragments]
+        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, max_fragments, 3]
 
         # Calculate the loss by comparing to labels
         loss = calculate_loss(predicted_output, labels)
