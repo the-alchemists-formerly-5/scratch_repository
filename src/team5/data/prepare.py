@@ -118,27 +118,28 @@ def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer(seq, padding="max_length")["attention_mask"]
 
 
-RE_QTOF = re.compile(r"tof|synapt", re.IGNORECASE)
-RE_ORBI = re.compile(r"orbitrap|exactive", re.IGNORECASE)
-RE_FTMS = re.compile(r"tf", re.IGNORECASE)
+RE_QTOF = re.compile(r"tof|synapt|impact", re.IGNORECASE)
+RE_ORBI = re.compile(r"orbitrap|exactive|qehf", re.IGNORECASE)
+RE_FTMS = re.compile(r"tf|ion trap|qit", re.IGNORECASE)
+RE_QQQQ = re.compile(r"qq", re.IGNORECASE)
 
 
 def instrument(instr: str) -> list[int]:
-    vec = [0] * 4
     if not instr:
-        vec[3] = 1
-        return vec
+        return [0, 0, 0, 0, 0]
 
+    if instr.startswith("cfm-predict"):
+        return [1, 0, 0, 0, 0]
     if RE_QTOF.search(instr):
-        vec[0] = 1
-    elif RE_ORBI.search(instr):
-        vec[1] = 1
-    elif RE_FTMS.search(instr):
-        vec[2] = 1
-    else:
-        vec[3] = 1
+        return [0, 1, 0, 0, 0]
+    if RE_ORBI.search(instr):
+        return [0, 0, 1, 0, 0]
+    if RE_FTMS.search(instr):
+        return [0, 0, 0, 1, 0]
+    if RE_QQQQ.search(instr):
+        return [0, 0, 0, 0, 1]
 
-    return vec
+    return [0, 0, 0, 0, 0]
 
 
 def prepare_data(df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET) -> None:
