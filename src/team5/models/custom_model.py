@@ -9,64 +9,82 @@ from matchms import Spectrum
 from matchms.similarity import CosineGreedy, CosineHungarian
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments):
+    def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
-        
-        self.layer1 = nn.Linear(max_seq_length, 512)
+
+        # Linear layer to process supplementary data
+        self.layer1 = nn.Linear(supplementary_data_dim, hidden_size)
         self.activation1 = nn.ReLU()
         self.dropout1 = nn.Dropout(0.1)
-        self.layernorm1 = nn.LayerNorm(512)
-        self.layer2 = nn.Linear(hidden_size + supplementary_data_dim, 3)
-        self.activation2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(0.1)
+        self.layernorm1 = nn.LayerNorm(hidden_size)
 
+        # Multihead cross-attention layer
+        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+
+        # Multihead self-attention layer
+        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+
+        # Output linear layer to project to (b, max_fragments, 3)
+        self.output_linear = nn.Linear(hidden_size, 3)
+        self.dropout2 = nn.Dropout(0.1)
+        self.activation2 = nn.ReLU()
 
     def forward(self, x, supplementary_data, attention_mask):
-        # (b, s, h) -> (b, h, s)
-        x = einops.rearrange(x, 'b s h -> b h s')
+        # x: (batch_size, seq_length, hidden_size)
+        # supplementary_data: (batch_size, supplementary_data_dim)
+        # attention_mask: (batch_size, seq_length)
 
-        # Expand the attention mask to match the shape of x and ensure it is a float tensor
-        expanded_mask = attention_mask.unsqueeze(1).expand_as(x).float()
+        # Apply the attention mask to zero out padding tokens in x
+        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
+        x = x * expanded_mask  # Zero out padding tokens
 
-        # Apply the attention mask to zero out padding tokens
-        x = x * expanded_mask
+        # Process supplementary data to match hidden_size
+        supplementary_data = self.layer1(supplementary_data)  # Shape: (batch_size, hidden_size)
+        supplementary_data = self.dropout1(supplementary_data)
+        supplementary_data = self.layernorm1(supplementary_data)
+        supplementary_data = self.activation1(supplementary_data)
 
-        # Supplementary data is a list of [b, 75] floats, explode it to [b, 75, 128]
-        supplementary_data = einops.repeat(supplementary_data, 'b d -> b d s', s=x.shape[2])
+        # Expand supplementary_data to match x's shape and add to x
+        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
+        x = x + supplementary_data_expanded
 
-        # (b, h, s) -> (b, h + 75, s)
-        x = torch.cat([x, supplementary_data], dim=1)
+        # Initialize y randomly with shape (batch_size, max_fragments, hidden_size)
+        batch_size, _, hidden_size = x.size()
+        y = torch.randn(batch_size, self.max_fragments, hidden_size, device=x.device, dtype=x.dtype)
 
-        # (b, h + 75, s) -> (b, h + 75, max_fragments)
-        x = self.layer1(x)
-        x = self.dropout1(x)
-        x = self.layernorm1(x)
-        x = self.activation1(x)
+        # Create key_padding_mask for x (True where padding)
+        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
 
-        # (b, h+75, max_fragments) -> (b, max_fragments, h+75)
-        x = einops.rearrange(x, 'b h s -> b s h')
+        # Multihead cross-attention: query from y, key and value from x
+        y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
+        # y is updated after cross-attention
 
-        # (b, max_fragments, h+75) -> (b, max_fragments, 3)
-        x = self.layer2(x)
-        x = self.dropout2(x)
-        x = self.activation2(x)
+        # Multihead self-attention on y
+        y, _ = self.self_attention(query=y, key=y, value=y)
+        # y is further updated after self-attention
 
-        # Apply sigmoid to the third number (flags) to get values near 0 or 1
-        mzs = x[:, :, 0]  # First number (labels)
-        probs = x[:, :, 1]   # Second number (probs)
-        flags = x[:, :, 2]   # Third number (flags)
+        # Project y to (batch_size, max_fragments, 3)
+        y = self.output_linear(y)
+        y = self.dropout2(y)
+        y = self.activation2(y)
 
-        flags = torch.sigmoid(flags)  # Apply sigmoid to flags
+        # Split y into mzs, probs, and flags
+        mzs = y[:, :, 0]    # Shape: (batch_size, max_fragments)
+        probs = y[:, :, 1]  # Shape: (batch_size, max_fragments)
+        flags = y[:, :, 2]  # Shape: (batch_size, max_fragments)
 
-        # Multiply the first number (labels) by the flag
+        # Apply sigmoid to flags to get values between 0 and 1
+        flags = torch.sigmoid(flags)
+
+        # Multiply mzs by flags
         mzs = mzs * flags
 
-        # Adjust the second number (probs) to be very negative where the flag is 0
+        # Adjust probs where flags are zero
         probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
 
-        # Apply softmax to the adjusted probabilities along the fragment dimension
+        # Apply softmax to probs along the fragment dimension
         probs = torch.softmax(probs, dim=1)
 
         return mzs, probs, flags
@@ -188,11 +206,11 @@ class CustomChemBERTaModel(nn.Module):
 
         # Step 3: Calculate the metrics using the processed predicted and ground truth values
         greedy_score = greedy_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
-        hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
+        #hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
 
         return {
-            'greedy_cosine': greedy_score,
-            'hungarian_cosine': hungarian_score
+            'greedy_cosine': greedy_score
+            #'hungarian_cosine': hungarian_score
         }    
 
 
