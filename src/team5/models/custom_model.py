@@ -1,4 +1,3 @@
-import einops
 import torch.nn as nn
 import torch
 from torch.nn.functional import cosine_similarity
@@ -100,10 +99,15 @@ def extract_predictions(interleaved_vec):
     flag = interleaved_vec[:, 2::3]  # Extract flag (odd indices across batch)
     return mzs, intensities, flag
 
-def calculate_loss(predictions, actual_vec, sigma):
+def calculate_loss(predictions, actual_labels, sigma):
     pred_mzs, pred_probabilities, flag = predictions
-    actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
-
+    actual_mzs, actual_intensities = actual_labels
+    
+    print("pred_mzs shape:", pred_mzs.shape)
+    print("actual_mzs shape:", actual_mzs.shape)
+    print("pred_probabilities shape:", pred_probabilities.shape)
+    print("actual_intensities shape:", actual_intensities.shape)
+    
     # normalise actual_intensities by dividing by the sum along dim 1
     actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
 
@@ -164,7 +168,7 @@ class CustomChemBERTaModel(nn.Module):
         self.dim_supplementary_data = supplementary_data_dim
 
         # We'll initialize final_layers in the forward method
-        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, self.dim_supplementary_data, self.max_fragments)
+        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, self.dim_supplementary_data, self.max_fragments, num_heads=8)
 
     def forward(self, input_ids, attention_mask, supplementary_data, labels):
         # Pass inputs through ChemBERTa
@@ -310,10 +314,26 @@ if __name__ == "__main__":
     # Example interleaved lists (padded and converted to tensors)
 
     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
-    MS_model = CustomChemBERTaModel(model, 256, 512)
+    
+    # Add the supplementary_data_dim parameter
+    MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=75)  # Adjust the value of supplementary_data_dim as needed
 
-    print(MS_model)
+    # print(MS_model)
 
-    for name, param in MS_model.named_parameters():
-        if param.requires_grad:
-            print(f"{name} has shape {param.shape}")
+    # for name, param in MS_model.named_parameters():
+    #     if param.requires_grad:
+    #         print(f"{name} has shape {param.shape}")
+    
+    pred_vect = torch.tensor([[338, 0.3, 1, 350, 0.01, 1, 253, 1, 1, 0, 0, 0, 0, 0, 0], 
+                              [350, 0.01, 1, 253, 1, 1, 338, 0.3, 1, 0, 0, 0, 0, 0, 0], 
+                              [0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]])
+    actual_vect = torch.tensor([[338, 0.3, 1, 350, 0.01, 1, 253, 1, 1, 0, 0, 0, 0, 0, 0], 
+                              [350, 0.01, 1, 253, 1, 1, 338, 0.3, 1, 0, 0, 0, 0, 0, 0]])
+    
+
+    loss_value = calculate_loss(pred_vect, actual_vect, sigma=0.1)
+    print(f"Loss: {loss_value}")
+
+    
+
+
