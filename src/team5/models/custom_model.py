@@ -53,7 +53,7 @@ class FinalLayers(nn.Module):
         x = self.dropout2(x)
         x = self.activation2(x)
 
-                # Apply sigmoid to the third number (flags) to get values near 0 or 1
+        # Apply sigmoid to the third number (flags) to get values near 0 or 1
         mzs = x[:, :, 0]  # First number (labels)
         probs = x[:, :, 1]   # Second number (probs)
         flags = x[:, :, 2]   # Third number (flags)
@@ -82,14 +82,14 @@ def extract_predictions(interleaved_vec):
     flag = interleaved_vec[:, 2::3]  # Extract flag (odd indices across batch)
     return mzs, intensities, flag
 
-def calculate_loss(predictions, actual_vec):
+def calculate_loss(predictions, actual_vec, sigma):
     pred_mzs, pred_probabilities, flag = predictions
     actual_mzs, actual_intensities = extract_fragments_from_interleaved(actual_vec)
 
     # normalise actual_intensities by dividing by the sum along dim 1
     actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
 
-    return gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, pred_mzs, pred_probabilities)
+    return gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, pred_mzs, pred_probabilities, sigma)
 
 
 def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
@@ -138,7 +138,7 @@ class CustomChemBERTaModel(nn.Module):
         self.model = model
         self.max_fragments = max_fragments
         self.max_seq_length = max_seq_length
-        
+        self.steps = 0
         # Get hidden size from the ChemBERTa model configuration
         self.hidden_size = self.model.config.hidden_size
 
@@ -156,9 +156,13 @@ class CustomChemBERTaModel(nn.Module):
         last_hidden_state = outputs.hidden_states[-1]  
 
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, max_fragments, 3]
-
+        
+        # Schedule sigma from 1.0 to 0.0001 over the course of 100000 steps
+        sigma = 1.0 - (1.0 - 0.0001) * (self.steps / 100000)
+        self.steps += 1
+        
         # Calculate the loss by comparing to labels
-        loss = calculate_loss(predicted_output, labels)
+        loss = calculate_loss(predicted_output, labels, sigma=sigma)
 
         return loss, predicted_output
     
