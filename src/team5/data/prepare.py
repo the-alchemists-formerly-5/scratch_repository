@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 import sys
 from functools import partial
-from itertools import chain
 from pathlib import Path
 
 import polars as pl
@@ -93,23 +93,15 @@ PREPARED_PARQUET = "prepared"
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
     values = dict(
-        enumerate(
-            pl.scan_parquet(parquet).select(column).unique().collect()[column].sort()
-        )
+        enumerate(pl.scan_parquet(parquet).select(column).unique().collect()[column].sort())
     )
     return {v: k for k, v in values.items()}
 
 
-def interleave(elem: pl.Struct) -> list[float]:
-    # Sort mzs, and then sort intensities to the same order
-    if len(elem["mzs"]) == 0:
-        return [0.0] * (MAX_MZS * 2)
-    sorted_mzs, sorted_intensities = zip(
-        *sorted(zip(elem["mzs"], elem["intensities"]), reverse=True)
-    )
-    labels = list(chain.from_iterable(zip(sorted_mzs, sorted_intensities)))
-    padding = [0.0] * (MAX_MZS * 2 - len(labels))
-    return labels[: 2 * MAX_MZS] + padding
+def pad(series: pl.Series, max_items: int) -> list[float]:
+    items = series.to_list()
+    padding = [0.0] * (max_items - len(items))
+    return items + padding
 
 
 def vectorize(lookup: dict[str, int], elem: str) -> list[int]:
@@ -126,9 +118,31 @@ def attention_mask(tokenizer: AutoTokenizer, seq: str) -> list[int]:
     return tokenizer(seq, padding="max_length")["attention_mask"]
 
 
-def prepare_data(
-    df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET
-) -> None:
+RE_QTOF = re.compile(r"tof|synapt|impact", re.IGNORECASE)
+RE_ORBI = re.compile(r"orbitrap|exactive|qehf", re.IGNORECASE)
+RE_FTMS = re.compile(r"tf|ion trap|qit", re.IGNORECASE)
+RE_QQQQ = re.compile(r"qq", re.IGNORECASE)
+
+
+def instrument(instr: str) -> list[int]:
+    if not instr:
+        return [0, 0, 0, 0, 0]
+
+    if instr.startswith("cfm-predict"):
+        return [1, 0, 0, 0, 0]
+    if RE_QTOF.search(instr):
+        return [0, 1, 0, 0, 0]
+    if RE_ORBI.search(instr):
+        return [0, 0, 1, 0, 0]
+    if RE_FTMS.search(instr):
+        return [0, 0, 0, 1, 0]
+    if RE_QQQQ.search(instr):
+        return [0, 0, 0, 0, 1]
+
+    return [0, 0, 0, 0, 0]
+
+
+def prepare_data(df: pl.DataFrame, head: int = 0, filename: Path = PREPARED_PARQUET) -> None:
     print("Loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
@@ -136,7 +150,11 @@ def prepare_data(
         df = df.head(head)
 
     print("Transforming raw data and writing prepared data to disk")
-    df.lazy().with_columns(
+    df.lazy().filter(
+        pl.col("collision_energy").is_not_null(),
+        # collision_energy has digits
+        pl.col("collision_energy").str.contains(r"\d"),
+    ).with_columns(
         tokenized_smiles=pl.col("smiles").map_elements(
             partial(tokenizer.encode, padding="max_length"),
             return_dtype=pl.List(pl.Int64),
@@ -144,8 +162,11 @@ def prepare_data(
         attention_mask=pl.col("smiles").map_elements(
             partial(attention_mask, tokenizer), return_dtype=pl.List(pl.Int64)
         ),
-        labels=pl.struct(["mzs", "intensities"]).map_elements(
-            interleave, return_dtype=pl.List(pl.Float64)
+        padded_mzs=pl.col("mzs").map_elements(
+            partial(pad, max_items=MAX_MZS), return_dtype=pl.List(pl.Float64)
+        ),
+        padded_intensities=pl.col("intensities").map_elements(
+            partial(pad, max_items=MAX_MZS), return_dtype=pl.List(pl.Float64)
         ),
         enum_adduct=pl.col("adduct").map_elements(
             partial(vectorize, ADDUCT),
@@ -153,24 +174,34 @@ def prepare_data(
             skip_nulls=False,
         ),
         enum_in_silico=pl.col("in_silico").cast(pl.Int64),
+        enum_instrument=pl.col("instrument_type").map_elements(
+            instrument, return_dtype=pl.List(pl.Int64)
+        ),
+        ev=pl.col("collision_energy").str.extract_all(r"\d+\.?\d*").list.last().cast(pl.Float64),
     ).select(
         [
             "tokenized_smiles",
             "attention_mask",
-            "labels",
+            "padded_mzs",
+            "padded_intensities",
             pl.concat_list(
-                "precursor_mz", "precursor_charge", "enum_in_silico", "enum_adduct"
+                "precursor_mz",
+                "precursor_charge",
+                "ev",
+                "enum_in_silico",
+                "enum_instrument",
+                "enum_adduct",
             ).alias("supplementary_data"),
         ]
-    ).sink_parquet(
-        filename
-    )
+    ).sink_parquet(filename)
 
 
-def tensorize(df: pl.DataFrame, head: int = 0, split: str = "train") -> tuple[
+def tensorize(
+    df: pl.DataFrame, head: int = 0, split: str = "train"
+) -> tuple[
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
+    tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
 ]:
     filename = Path(f"{PREPARED_PARQUET}_{split}.parquet")
@@ -185,18 +216,25 @@ def tensorize(df: pl.DataFrame, head: int = 0, split: str = "train") -> tuple[
     return (
         torch.tensor(df["tokenized_smiles"], dtype=torch.long),
         torch.tensor(df["attention_mask"], dtype=torch.long),
-        torch.tensor(df["labels"], dtype=torch.float),
+        (
+            torch.tensor(df["padded_mzs"], dtype=torch.float),
+            torch.tensor(df["padded_intensities"], dtype=torch.float),
+        ),
         torch.tensor(df["supplementary_data"], dtype=torch.float),
     )
 
 
 if __name__ == "__main__":
     print(f"Only run this way for testing/debugging! This only reads {HEAD} rows.")
-    (tokenized_smiles, attention_mask, labels, supplementary_data) = tensorize(
-        pl.read_parquet(sys.argv[1]), head=HEAD
-    )
+    (
+        tokenized_smiles,
+        attention_mask,
+        (padded_mzs, padded_intensities),
+        supplementary_data,
+    ) = tensorize(pl.read_parquet(sys.argv[1]), head=HEAD)
 
     print("tokenized_smiles: ", tokenized_smiles)
     print("attention_mask: ", attention_mask)
-    print("labels: ", labels)
+    print("padded_mzs: ", padded_mzs)
+    print("padded_intensities: ", padded_intensities)
     print("supplementary_data: ", supplementary_data)

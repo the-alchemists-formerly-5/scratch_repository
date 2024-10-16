@@ -1,80 +1,11 @@
-from itertools import chain
-
-import polars as pl
 import pytest
 
-from src.team5.data.prepare import MAX_MZS, interleave, vectorize
+from src.team5.data.prepare import vectorize
 
 
 # Mock pl.Struct for testing
 def mock_struct(mzs, intensities):
     return {"mzs": mzs, "intensities": intensities}
-
-
-def test_interleave_normal_case():
-    input_struct = mock_struct([1.0, 2.0, 3.0], [100.0, 200.0, 300.0])
-    result = interleave(input_struct)
-    expected = [3.0, 300.0, 2.0, 200.0, 1.0, 100.0] + [0.0] * (MAX_MZS * 2 - 6)
-    assert result == expected
-
-
-def test_interleave_empty_input():
-    input_struct = mock_struct([], [])
-    result = interleave(input_struct)
-    expected = [0.0] * (MAX_MZS * 2)
-    assert result == expected
-
-
-def test_interleave_single_element():
-    input_struct = mock_struct([1.0], [100.0])
-    result = interleave(input_struct)
-    expected = [1.0, 100.0] + [0.0] * (MAX_MZS * 2 - 2)
-    assert result == expected
-
-
-def test_interleave_max_elements():
-    mzs = [float(i) for i in range(MAX_MZS)]
-    intensities = [float(i * 100) for i in range(MAX_MZS)]
-    input_struct = mock_struct(mzs, intensities)
-    result = interleave(input_struct)
-    sorted_mzs, sorted_intensities = zip(*sorted(zip(mzs, intensities), reverse=True))
-    expected = list(chain.from_iterable(zip(sorted_mzs, sorted_intensities)))
-    assert result == expected
-    assert len(result) == MAX_MZS * 2
-
-
-def test_interleave_more_than_max_elements():
-    mzs = [float(i) for i in range(MAX_MZS + 1)]
-    intensities = [float(i * 100) for i in range(MAX_MZS + 1)]
-    input_struct = mock_struct(mzs, intensities)
-    result = interleave(input_struct)
-    sorted_mzs, sorted_intensities = zip(*sorted(zip(mzs, intensities), reverse=True))
-    expected = list(
-        chain.from_iterable(zip(sorted_mzs[:MAX_MZS], sorted_intensities[:MAX_MZS]))
-    )
-    assert result == expected
-    assert len(result) == MAX_MZS * 2
-
-
-def test_interleave_uneven_inputs():
-    input_struct = mock_struct([1.0, 2.0, 3.0], [100.0, 200.0])
-
-    result = interleave(input_struct)
-    expected = [2.0, 200.0, 1.0, 100.0] + [0.0] * (MAX_MZS * 2 - 4)
-    assert result == expected
-    assert len(result) == MAX_MZS * 2
-
-
-def test_interleave_result_length():
-    input_struct = mock_struct([1.0, 2.0], [100.0, 200.0])
-    result = interleave(input_struct)
-    assert len(result) == MAX_MZS * 2
-
-
-def test_interleave_padding():
-    input_struct = mock_struct([1.0, 2.0], [100.0, 200.0])
-    result = interleave(input_struct)
-    assert result[4:] == [0.0] * (MAX_MZS * 2 - 4)
 
 
 def test_vectorize_single_element():
