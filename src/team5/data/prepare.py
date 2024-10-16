@@ -226,12 +226,15 @@ def tensorize(
 
 if __name__ == "__main__":
     print(f"Only run this way for testing/debugging! This only reads {HEAD} rows.")
-    (tokenized_smiles, (padded_mzs, padded_intensities), labels, supplementary_data) = tensorize(
-        pl.read_parquet(sys.argv[1]), head=HEAD
-    )
+    (
+        tokenized_smiles,
+        attention_mask,
+        (padded_mzs, padded_intensities),
+        supplementary_data,
+    ) = tensorize(pl.read_parquet(sys.argv[1]), head=HEAD)
 
     print("tokenized_smiles: ", tokenized_smiles)
     print("attention_mask: ", attention_mask)
-    print("padded_mzs: ", labels)
-    print("padded_intensities: ", labels)
+    print("padded_mzs: ", padded_mzs)
+    print("padded_intensities: ", padded_intensities)
     print("supplementary_data: ", supplementary_data)
