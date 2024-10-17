@@ -231,10 +231,7 @@ class CustomChemBERTaModel(nn.Module):
         greedy_score = sum(greedy_scores) / len(greedy_scores)
         #hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
 
-        return {
-            'greedy_cosine': greedy_score
-            #'hungarian_cosine': hungarian_score
-        }    
+        return greedy_score
 
 
 def process_predicted_output(predicted_output):
