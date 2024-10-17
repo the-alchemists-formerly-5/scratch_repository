@@ -2,12 +2,10 @@ import logging
 
 import torch.nn as nn
 import torch
-from torch.nn.functional import cosine_similarity
 from transformers import AutoModelForMaskedLM, AutoTokenizer
-from peft import LoraConfig, get_peft_model
 import torch.nn.functional as F
 from matchms import Spectrum
-from matchms.similarity import CosineGreedy, CosineHungarian
+from matchms.similarity import CosineGreedy
 import numpy as np
 
 logging.getLogger("matchms").setLevel(logging.ERROR)
@@ -121,7 +119,15 @@ class CustomChemBERTaModel(nn.Module):
         # Training mode flag
         self.training_mode = True
 
-    def forward(self, input_ids, attention_mask, supplementary_data, labels=None):
+    def forward(self, *inputs, **kwargs):
+
+        # assert we're getting input_ids, attention_mask, supplementary_data, labels=None
+        assert len(inputs) == 3
+        assert 'labels' in kwargs
+
+        input_ids, attention_mask, supplementary_data = inputs
+        labels = kwargs['labels']
+
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         last_hidden_state = outputs.hidden_states[-1]  
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)
