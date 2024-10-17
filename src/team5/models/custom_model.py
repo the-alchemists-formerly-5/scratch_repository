@@ -160,53 +160,35 @@ class CustomChemBERTaModel(nn.Module):
 
     def calculate_loss(self, predictions, actual_labels, sigma):
 
-        print(f"predictions: {predictions}")
-        print(f"actual_labels: {actual_labels}")
-        print(f"sigma: {sigma}")
-
         pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
         actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
         return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
 
-        print(f"pred_mzs: {pred_mzs}")
-        print(f"pred_probabilities: {pred_probabilities}")
-        print(f"actual_mzs: {actual_mzs}")
-        print(f"actual_probabilities: {actual_probabilities}")
+        print(f"pred_probabilities:\n {pred_probabilities}")
+        print(f"actual_probabilities:\n {actual_probabilities}")
 
-        # Gaussian prediction function
         def gaussian_prediction(x, centers, heights, sigma):
+            x = x.unsqueeze(2)
+            centers = centers.unsqueeze(1)
+            heights = heights.unsqueeze(1)
             
-            # Reshape tensors for broadcasting
-            x = x.unsqueeze(2)  # Shape: (batch_size, max_len, 1)
-            centers = centers.unsqueeze(1)  # Shape: (batch_size, 1, max_len)
-            heights = heights.unsqueeze(1)  # Shape: (batch_size, 1, max_len)
-            
-            # Compute Gaussian
             gauss = torch.exp(-((x - centers) ** 2) / (2 * sigma ** 2))
             
-            # Multiply by heights and sum
-            return torch.sum(heights * gauss, dim=2)
-
-        batch_size = pred_mzs.shape[0]
-        max_len = max(pred_mzs.shape[1], actual_mzs.shape[1])
-        
-        # Pad tensors to have the same length
-        pred_mzs_padded = F.pad(pred_mzs, (0, max_len - pred_mzs.shape[1]))
-        pred_probabilities_padded = F.pad(pred_probabilities, (0, max_len - pred_probabilities.shape[1]))
-        actual_mzs_padded = F.pad(actual_mzs, (0, max_len - actual_mzs.shape[1]))
-        actual_probabilities_padded = F.pad(actual_probabilities, (0, max_len - actual_probabilities.shape[1]))
+            result = torch.sum(heights * gauss, dim=2)
+            print(f"result: \n {result}")
+            return result
 
         # Compute gaussian predictions for actual mzs
-        gaussian_pred_probabilities = gaussian_prediction(actual_mzs_padded, pred_mzs_padded, pred_probabilities_padded, sigma)
-        
+        gaussian_pred_probabilities = gaussian_prediction(actual_mzs, pred_mzs, pred_probabilities, sigma)
+
         # Clamp values to avoid zeros
         gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
 
         # Compute cosine similarity
-        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities_padded, dim=1)
-        
+        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities, dim=1)
+
         # Convert similarity to loss (1 - similarity)
         loss = 1 - similarity
 
@@ -365,10 +347,10 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     
     BASE_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
-    MAX_FRAGMENTS = 512 # from anton, max number of mzs/intensities
-    MAX_SEQ_LENGTH = 512 # base model max seq length
+    MAX_FRAGMENTS = 4 # from anton, max number of mzs/intensities
+    MAX_SEQ_LENGTH = 10 # base model max seq length
     SUPPLEMENTARY_DATA_DIM = 81
-    batch_size = 8
+    batch_size = 8  # Ensure this is set to 8
 
     # Initialize the CustomChemBERTaModel (untrained)
     custom_model = CustomChemBERTaModel(chemBERTa_model, MAX_FRAGMENTS, MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM)
@@ -391,36 +373,31 @@ if __name__ == "__main__":
     labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
 
 
-    # Perform a forward pass with the custom model (untrained)
-    pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels=None)
+   # Create labels tensor
+    mz_values = torch.randint(100, 401, (batch_size, MAX_FRAGMENTS))
+    intensities = torch.rand((batch_size, MAX_FRAGMENTS))
+    probabilities = intensities / intensities.sum(dim=1, keepdim=True)  # Normalize to sum to 1 for each batch
+    labels = torch.stack([mz_values, probabilities], dim=-1)
+
+    print(f"labels shape: {labels.shape}")
+
+    # Create pred_output tensor
+    pred_mzs = mz_values
+    pred_probabilities = probabilities
+    pred_flags = torch.rand((batch_size, MAX_FRAGMENTS))  # Random values between 0 and 1
+    pred_output = torch.stack([pred_mzs, pred_probabilities, pred_flags], dim=-1)
+
     print(f"pred_output shape: {pred_output.shape}")
-    
-    pred_mzs = pred_output[:, :, 0]    # Predicted m/z values
-    pred_probabilities = pred_output[:, :, 1]  # Predicted probabilities
-    pred_flags = pred_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-    # mask = (pred_flags > 0.5).float()
 
-    # Set values to zero where the flag is below the threshold
-    # pred_mzs = pred_mzs * mask
-    # pred_probabilities = pred_probabilities * mask
-
-    sigma = 0.00001  # You can adjust this value or make it a parameter
-    noise = torch.randn_like(pred_mzs) * sigma
-    noisy_pred_mzs = pred_mzs + noise
-    new_labels = torch.stack([pred_mzs, pred_probabilities], dim=-1)
-
-    print(f"new_labels shape: {new_labels.shape}")
-    print(f"original labels shape: {labels.shape}")
-
-    loss = custom_model.calculate_loss(pred_output, new_labels, sigma=sigma)
+    # Calculate loss
+    sigma = 0.00001
+    loss = custom_model.calculate_loss(pred_output, labels, sigma=sigma)
     print(f"Loss value: {loss.item()}")
 
+    # Evaluate spectra
+    evaluation_score = custom_model.evaluate_spectra(pred_output, labels)
+    print(f"Evaluation score: {evaluation_score}")
 
-    # loss, pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels)
-    # print(f"pred_output shape: {pred_output.shape}")
-    # print(f"loss: {loss}")
-
-    print(custom_model.evaluate_spectra(pred_output, new_labels))
 
     # # Test the loss calculation
     # print(f"Loss value: {loss.item()}")
@@ -445,3 +422,4 @@ if __name__ == "__main__":
     # # Perform spectra evaluation
     # evaluation_results = MS_model.evaluate_spectra(predicted_output, labels_for_eval)
     # print(f"Greedy cosine score: {evaluation_results['greedy_cosine']}")
+
