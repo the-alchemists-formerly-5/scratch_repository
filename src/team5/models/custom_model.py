@@ -6,7 +6,7 @@ from peft import LoraConfig, get_peft_model
 import torch.nn.functional as F
 from matchms import Spectrum
 from matchms.similarity import CosineGreedy, CosineHungarian
-
+import numpy as np
 class FinalLayers(nn.Module):
     def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
         super(FinalLayers, self).__init__()
@@ -83,7 +83,10 @@ class FinalLayers(nn.Module):
         # Adjust probs where flags are zero
         probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
 
-        # Apply softmax to probs along the fragment dimension
+        # Softmax on probs
+        probs = F.softmax(probs, dim=1)
+
+        # Stack together mzs, probs, and flags
         output = torch.stack([mzs, probs, flags], dim=-1)
 
         return output
@@ -131,20 +134,22 @@ class CustomChemBERTaModel(nn.Module):
             return loss, predicted_output
         else:
             return predicted_output
-
-    def calculate_loss(self, predictions, actual_labels, sigma):
-        pred_mzs = predictions[:, :, 0]    # Predicted m/z values
-        pred_probabilities = predictions[:, :, 1]  # Predicted probabilities
-        pred_flags = predictions[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-
-        # Split the actual_labels tensor into mzs and intensities
+        
+    def extract_from_predicted_output(self, predicted_output):
+        pred_mzs = predicted_output[:, :, 0]    # Predicted m/z values
+        pred_probabilities = predicted_output[:, :, 1]  # Predicted probabilities
+        pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
+        return pred_mzs, pred_probabilities, pred_flags
+    
+    def extract_from_actual_labels(self, actual_labels):
         actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
         actual_intensities = actual_labels[:, :, 1]  # Shape: (batch_size, max_fragments)
-
-        # Normalize actual intensities to form probabilities
         actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
-        
+        return actual_mzs, actual_intensities, actual_probabilities
 
+    def calculate_loss(self, predictions, actual_labels, sigma):
+        pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
+        actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
         return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
@@ -192,7 +197,7 @@ class CustomChemBERTaModel(nn.Module):
     def reset_steps(self):
         self.steps = 0
     
-    def evaluate_spectra(self, predicted_output, labels, threshold=0.5):
+    def evaluate_spectra(self, predicted_output, labels):
         """
         Evaluate spectra using greedy cosine and hungarian cosine metrics, processing both 
         the predicted output and the labels to extract m/z values and intensities.
@@ -207,13 +212,23 @@ class CustomChemBERTaModel(nn.Module):
         """
 
         # Step 1: Process the predicted output
-        pred_mz, pred_intensities = process_predicted_output(predicted_output, threshold)
+        pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
+        # Apply the threshold: if flag > 0.5, keep values, else zero them out
+        mask = (pred_flags > 0.5).float()
+
+        # Set values to zero where the flag is below the threshold
+        pred_mz = pred_mz * mask
+        pred_probs = pred_probs * mask
 
         # Step 2: Extract the ground truth m/z and intensities from labels
-        mz_true, intensities_true = labels
+        mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
 
-        # Step 3: Calculate the metrics using the processed predicted and ground truth values
-        greedy_score = greedy_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
+        # Step 3: Calculate the metrics using the processed predicted and ground truth values, for each sample in the batch, then average
+        greedy_scores = []
+        for i in range(pred_mz.shape[0]):
+            greedy_score = greedy_cosine(pred_mz[i], mz_true[i], pred_probs[i], probabilities_true[i])
+            greedy_scores.append(greedy_score)
+        greedy_score = sum(greedy_scores) / len(greedy_scores)
         #hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
 
         return {
@@ -261,8 +276,14 @@ def create_spectrum(mz, intensities):
     Returns:
     - spectrum: A matchms Spectrum object
     """
-    metadata = {}  # You can populate this with any relevant metadata if necessary
-    return Spectrum(mz=mz.cpu().numpy(), intensities=intensities.cpu().numpy(), metadata=metadata)
+    metadata = {}
+    mz = mz.detach().numpy()
+    intensities = intensities.detach().numpy()
+    # sort the mz and intensities, according to mz
+    sorted_indices = np.argsort(mz)
+    mz = mz[sorted_indices]
+    intensities = intensities[sorted_indices]
+    return Spectrum(mz=mz, intensities=intensities, metadata=metadata)
 
 def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
     """
@@ -277,6 +298,7 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
     Returns:
     - similarity: CosineGreedy similarity score
     """
+    
     # Create Spectrum objects
     spectrum_a = create_spectrum(mz_a, intensities_a)
     spectrum_b = create_spectrum(mz_b, intensities_b)
@@ -285,7 +307,11 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
     cosine_greedy = CosineGreedy(tolerance=0.1)  # Adjust tolerance as needed
 
     # Compute the similarity score
-    score, _ = cosine_greedy.pair(spectrum_a, spectrum_b)
+    try:
+        result = cosine_greedy.pair(spectrum_a, spectrum_b)
+        score, _ = result.tolist()
+    except ZeroDivisionError as e:
+        score = 1.
     return score
 
 
@@ -342,9 +368,11 @@ if __name__ == "__main__":
 
 
     # Perform a forward pass with the custom model (untrained)
-    pred_output, loss = custom_model(input_ids, attention_mask, supplementary_data, labels)
+    loss, pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels)
     print(f"pred_output shape: {pred_output.shape}")
-    print(f"loss: {loss.shape}")
+    print(f"loss: {loss}")
+
+    print(custom_model.evaluate_spectra(pred_output, labels))
 
     # # Test the loss calculation
     # print(f"Loss value: {loss.item()}")
