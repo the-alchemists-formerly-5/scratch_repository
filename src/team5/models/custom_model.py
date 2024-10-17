@@ -143,12 +143,19 @@ class CustomChemBERTaModel(nn.Module):
 
         # Normalize actual intensities to form probabilities
         actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
+        
 
         return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
+        # Gaussian prediction function
         def gaussian_prediction(x, centers, heights, sigma):
-            return torch.sum(heights * torch.exp(-((x.unsqueeze(1) - centers.unsqueeze(2)) ** 2) / (2 * sigma ** 2)), dim=1)
+            x = x.unsqueeze(2)  # Shape: (batch_size, max_len, 1)
+            centers = centers.unsqueeze(1)  # Shape: (batch_size, 1, max_len)
+            heights = heights.unsqueeze(1)  # Shape: (batch_size, 1, max_len)
+            
+            gauss = torch.exp(-((x - centers) ** 2) / (2 * sigma ** 2))
+            return torch.sum(heights * gauss, dim=2)
 
         batch_size = pred_mzs.shape[0]
         max_len = max(pred_mzs.shape[1], actual_mzs.shape[1])
@@ -164,14 +171,15 @@ class CustomChemBERTaModel(nn.Module):
         
         # Clamp values to avoid zeros
         gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
+        actual_probabilities_padded = torch.clamp(actual_probabilities_padded, min=epsilon)
 
-        # Compute cosine similarity
+        # Compute cosine similarity for each sample in the batch
         similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities_padded, dim=1)
         
-        # Convert similarity to loss (1 - similarity)
-        loss = 1 - similarity
+        # Convert similarity to loss (1 - similarity) and average over the batch
+        loss = (1 - similarity).mean()
 
-        return loss.mean()
+        return loss
 
     def train(self, mode=True):
         super(CustomChemBERTaModel, self).train(mode)
@@ -280,70 +288,6 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
     score, _ = cosine_greedy.pair(spectrum_a, spectrum_b)
     return score
 
-# def hungarian_cosine(mz_a, mz_b, intensities_a, intensities_b):
-#     """
-#     Use CosineHungarian from matchms to calculate Hungarian cosine similarity between two spectra.
-    
-#     Parameters:
-#     - mz_a: m/z values for spectrum A
-#     - mz_b: m/z values for spectrum B
-#     - intensities_a: Intensity values for spectrum A
-#     - intensities_b: Intensity values for spectrum B
-    
-#     Returns:
-#     - similarity: CosineHungarian similarity score
-#     """
-#     # Create Spectrum objects
-#     spectrum_a = create_spectrum(mz_a, intensities_a)
-#     spectrum_b = create_spectrum(mz_b, intensities_b)
-
-#     # Instantiate the CosineHungarian similarity function
-#     cosine_hungarian = CosineHungarian(tolerance=0.1)  # Adjust tolerance as needed
-
-#     # Compute the similarity score
-#     score, _ = cosine_hungarian.pair(spectrum_a, spectrum_b)
-#     return score
-
-
-
-# def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
-#     """
-#     Computes the cross-entropy loss between the actual and predicted distributions using
-#     Gaussian kernel density estimation with the log-sum-exp trick for numerical stability.
-
-#     Parameters:
-#     - actual_mzs: Tensor of shape (B, N_actual)
-#     - actual_probabilities: Tensor of shape (B, N_actual)
-#     - predicted_mzs: Tensor of shape (B, N_pred)
-#     - predicted_probabilities: Tensor of shape (B, N_pred)
-#     - sigma: Standard deviation of the Gaussian kernel (default: 1.0)
-
-#     Returns:
-#     - loss: Scalar tensor representing the cross-entropy loss
-#     """
-#     # Ensure the predicted probabilities are not zero to avoid log of zero
-#     epsilon = 1e-10
-#     predicted_probabilities = predicted_probabilities.clamp(min=epsilon)
-
-
-#     # Compute the squared differences divided by sigma
-#     D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / (2*sigma**2)
-
-#     # Compute the log of predicted probabilities and reshape for broadcasting
-#     log_predicted_probs = torch.log(predicted_probabilities).unsqueeze(1)
-
-#     # Compute the terms inside the log-sum-exp
-#     terms = log_predicted_probs - D
-
-#     # Apply the log-sum-exp trick along the predicted mzs axis
-#     log_p_predicted = torch.logsumexp(terms, dim=2)
-
-#     # Compute the cross-entropy loss
-#     loss = -torch.sum(actual_probabilities * log_p_predicted, dim=1)
-
-#     loss = loss.mean()
-
-#     return loss
 
 
 # ----- Testing -----
@@ -370,28 +314,14 @@ if __name__ == "__main__":
     chemBERTa_model = AutoModelForMaskedLM.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     
-    # Define model parameters
-    max_fragments = 3
-    max_seq_length = 7
-    supplementary_data_dim = 32
-    batch_size = 8  # For testing
-    seq_length = 50  # Length of input sequences
-    initial_sigma = 2.0
-    final_sigma = 0.0001
-    eval_sigma = 0.1
-    total_steps = 1000000
+    BASE_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
+    MAX_FRAGMENTS = 512 # from anton, max number of mzs/intensities
+    MAX_SEQ_LENGTH = 512 # base model max seq length
+    SUPPLEMENTARY_DATA_DIM = 81
+    batch_size = 8
 
     # Initialize the CustomChemBERTaModel (untrained)
-    custom_model = CustomChemBERTaModel(
-        chemBERTa_model, 
-        max_fragments, 
-        max_seq_length, 
-        supplementary_data_dim, 
-        initial_sigma=initial_sigma, 
-        final_sigma=final_sigma, 
-        eval_sigma=eval_sigma, 
-        total_steps=total_steps
-    )
+    custom_model = CustomChemBERTaModel(chemBERTa_model, MAX_FRAGMENTS, MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM)
 
     # Create dummy input data
     input_smiles = ["CCONaCO", "CCC", "CCN", "CCCl", "CCBr", "CCCC", "CCCCO", "CCNCl"]
@@ -400,22 +330,21 @@ if __name__ == "__main__":
         padding='max_length',  # Ensure padding to max_seq_length
         truncation=True, 
         return_tensors="pt", 
-        max_length=max_seq_length  # Explicitly define max sequence length
+        max_length=MAX_SEQ_LENGTH  # Explicitly define max sequence length
     )
     #print(f"input_encodings: {input_encodings}")
     print(f" shape of input_encodings: {input_encodings['input_ids'].shape}")
 
     input_ids = input_encodings["input_ids"]  # Token IDs
     attention_mask = input_encodings["attention_mask"]  # Attention mask
-    supplementary_data = torch.randn(batch_size, supplementary_data_dim)  # Random supplementary data
-    labels = torch.randn(batch_size, max_fragments, 2)  # Random actual m/z and intensities for testing
+    supplementary_data = torch.randn(batch_size, SUPPLEMENTARY_DATA_DIM)  # Random supplementary data
+    labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
 
 
     # Perform a forward pass with the custom model (untrained)
-    pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels)
-    print(f"pred_output: {pred_output}")
-
-    loss = custom_model.calculate_loss(pred_output, labels, sigma=0.1)
+    pred_output, loss = custom_model(input_ids, attention_mask, supplementary_data, labels)
+    print(f"pred_output shape: {pred_output.shape}")
+    print(f"loss: {loss.shape}")
 
     # # Test the loss calculation
     # print(f"Loss value: {loss.item()}")
@@ -440,3 +369,4 @@ if __name__ == "__main__":
     # # Perform spectra evaluation
     # evaluation_results = MS_model.evaluate_spectra(predicted_output, labels_for_eval)
     # print(f"Greedy cosine score: {evaluation_results['greedy_cosine']}")
+
