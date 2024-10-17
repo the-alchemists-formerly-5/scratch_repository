@@ -1,3 +1,5 @@
+import logging
+
 import torch.nn as nn
 import torch
 from torch.nn.functional import cosine_similarity
@@ -7,6 +9,9 @@ import torch.nn.functional as F
 from matchms import Spectrum
 from matchms.similarity import CosineGreedy, CosineHungarian
 import numpy as np
+
+logging.getLogger("matchms").setLevel(logging.ERROR)
+
 class FinalLayers(nn.Module):
     def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
         super(FinalLayers, self).__init__()
@@ -144,25 +149,28 @@ class CustomChemBERTaModel(nn.Module):
     def extract_from_actual_labels(self, actual_labels):
         actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
         actual_intensities = actual_labels[:, :, 1]  # Shape: (batch_size, max_fragments)
-        actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
+        actual_probabilities = actual_intensities / (torch.sum(actual_intensities, dim=1, keepdim=True) + 1e-8)
         return actual_mzs, actual_intensities, actual_probabilities
 
     def calculate_loss(self, predictions, actual_labels, sigma):
+
+        print(f"predictions: {predictions}")
+        print(f"actual_labels: {actual_labels}")
+        print(f"sigma: {sigma}")
+
         pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
         actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
         return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
-        print(f"The shape of pred_mzs: {pred_mzs.shape}")
-        print(f"The shape of pred_probabilities: {pred_probabilities.shape}")
-        print(f"The shape of actual_mzs: {actual_mzs.shape}")
-        print(f"The shape of actual_probabilities: {actual_probabilities.shape}")
+
+        print(f"pred_mzs: {pred_mzs}")
+        print(f"pred_probabilities: {pred_probabilities}")
+        print(f"actual_mzs: {actual_mzs}")
+        print(f"actual_probabilities: {actual_probabilities}")
 
         # Gaussian prediction function
         def gaussian_prediction(x, centers, heights, sigma):
-            print(f"The shape of x: {x.shape}")
-            print(f"The shape of centers: {centers.shape}")
-            print(f"The shape of heights: {heights.shape}")
             
             # Reshape tensors for broadcasting
             x = x.unsqueeze(2)  # Shape: (batch_size, max_len, 1)
@@ -217,7 +225,6 @@ class CustomChemBERTaModel(nn.Module):
         Parameters:
         - predicted_output: Tuple (pred_mz, pred_probs, pred_flags)
         - labels: Ground truth labels Tuple(m/z, intensities)
-        - threshold: A cutoff value for flags to zero out certain predictions.
         
         Returns:
         - A dictionary with the greedy cosine score.
@@ -383,16 +390,16 @@ if __name__ == "__main__":
     pred_mzs = pred_output[:, :, 0]    # Predicted m/z values
     pred_probabilities = pred_output[:, :, 1]  # Predicted probabilities
     pred_flags = pred_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-    mask = (pred_flags > 0.5).float()
+    # mask = (pred_flags > 0.5).float()
 
     # Set values to zero where the flag is below the threshold
-    pred_mzs = pred_mzs * mask
-    pred_probabilities = pred_probabilities * mask
+    # pred_mzs = pred_mzs * mask
+    # pred_probabilities = pred_probabilities * mask
 
-    sigma = 0.1  # You can adjust this value or make it a parameter
+    sigma = 0.00001  # You can adjust this value or make it a parameter
     noise = torch.randn_like(pred_mzs) * sigma
     noisy_pred_mzs = pred_mzs + noise
-    new_labels = torch.stack([noisy_pred_mzs, pred_probabilities], dim=-1)
+    new_labels = torch.stack([pred_mzs, pred_probabilities], dim=-1)
 
     print(f"new_labels shape: {new_labels.shape}")
     print(f"original labels shape: {labels.shape}")
@@ -401,11 +408,11 @@ if __name__ == "__main__":
     print(f"Loss value: {loss.item()}")
 
 
-    loss, pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels)
-    print(f"pred_output shape: {pred_output.shape}")
-    print(f"loss: {loss}")
+    # loss, pred_output = custom_model(input_ids, attention_mask, supplementary_data, labels)
+    # print(f"pred_output shape: {pred_output.shape}")
+    # print(f"loss: {loss}")
 
-    print(custom_model.evaluate_spectra(pred_output, labels))
+    print(custom_model.evaluate_spectra(pred_output, new_labels))
 
     # # Test the loss calculation
     # print(f"Loss value: {loss.item()}")
