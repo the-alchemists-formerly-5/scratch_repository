@@ -84,35 +84,19 @@ class FinalLayers(nn.Module):
         probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
 
         # Apply softmax to probs along the fragment dimension
-        probs = torch.softmax(probs, dim=1)
+        output = torch.stack([mzs, probs, flags], dim=-1)
 
-        return mzs, probs, flags
+        return output
 
-def extract_fragments_from_interleaved(interleaved_vec):
-    mzs = interleaved_vec[:, ::2]  # Extract m/z values (even indices across batch)
-    intensities = interleaved_vec[:, 1::2]  # Extract intensities (odd indices across batch)
-    return mzs, intensities
 
-def extract_predictions(interleaved_vec):
-    mzs = interleaved_vec[:, ::3]  # Extract m/z values (even indices across batch)
-    intensities = interleaved_vec[:, 1::3]  # Extract intensities (odd indices across batch)
-    flag = interleaved_vec[:, 2::3]  # Extract flag (odd indices across batch)
-    return mzs, intensities, flag
+# Example usage
+pred_mzs = torch.tensor([[100.0, 120.0, 89.0, 300.0]])
+pred_probabilities = torch.tensor([[0.3, 0.4, 0.1, 0.2]])
+actual_mzs = torch.tensor([[102.0, 127.0, 302.0, 90.0]])
+actual_probabilities = torch.tensor([[0.25, 0.4, 0.25, 0.1]])
 
-def calculate_loss(predictions, actual_labels, sigma):
-    pred_mzs, pred_probabilities, flag = predictions
-    actual_mzs, actual_intensities = actual_labels
-    
-    print("pred_mzs shape:", pred_mzs.shape)
-    print("actual_mzs shape:", actual_mzs.shape)
-    print("pred_probabilities shape:", pred_probabilities.shape)
-    print("actual_intensities shape:", actual_intensities.shape)
-    
-    # normalise actual_intensities by dividing by the sum along dim 1
-    actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
-
-    return gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, pred_mzs, pred_probabilities, sigma)
-
+loss = gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities)
+print(f"Loss: {loss.item()}")
 
 def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
     """
@@ -135,7 +119,7 @@ def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs,
 
 
     # Compute the squared differences divided by sigma
-    D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / sigma
+    D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / (2*sigma**2)
 
     # Compute the log of predicted probabilities and reshape for broadcasting
     log_predicted_probs = torch.log(predicted_probabilities).unsqueeze(1)
@@ -155,58 +139,117 @@ def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs,
 
 
 class CustomChemBERTaModel(nn.Module):
-    def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim):
+    def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
+                 initial_sigma=2.0, final_sigma=0.0001, eval_sigma=0.1):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
         self.max_seq_length = max_seq_length
         self.steps = 0
-        # Get hidden size from the ChemBERTa model configuration
         self.hidden_size = self.model.config.hidden_size
-
-        # Dimension of the supplementary data
         self.dim_supplementary_data = supplementary_data_dim
+        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, 
+                                        self.dim_supplementary_data, self.max_fragments, num_heads=8)
+        
+        # Sigma scheduling parameters
+        self.initial_sigma = initial_sigma
+        self.final_sigma = final_sigma
+        self.eval_sigma = eval_sigma
+        self.total_steps = 1000000
+        
+        # Training mode flag
+        self.training_mode = True
 
-        # We'll initialize final_layers in the forward method
-        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, self.dim_supplementary_data, self.max_fragments, num_heads=8)
-
-    def forward(self, input_ids, attention_mask, supplementary_data, labels):
-        # Pass inputs through ChemBERTa
+    def forward(self, input_ids, attention_mask, supplementary_data, labels=None):
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-
-        # Extract last hidden state (embeddings)
         last_hidden_state = outputs.hidden_states[-1]  
-
-        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)  # Shape: [batch_size, max_fragments, 3]
+        predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)
         
-        # Schedule sigma from 1.0 to 0.0001 over the course of 100000 steps
-        sigma = 1.0 - (1.0 - 0.0001) * (self.steps / 100000)
-        self.steps += 1
+        if self.training_mode:
+            # Schedule sigma only during training
+            sigma = self.initial_sigma - (self.initial_sigma - self.final_sigma) * (self.steps / self.total_steps)
+            self.steps += 1
+        else:
+            # Use final sigma during evaluation
+            sigma = self.eval_sigma
         
-        # Calculate the loss by comparing to labels
-        loss = calculate_loss(predicted_output, labels, sigma=sigma)
+        if labels is not None:
+            loss = self.calculate_loss(predicted_output, labels, sigma=sigma)
+            return loss, predicted_output
+        else:
+            return predicted_output
 
-        return loss, predicted_output
+    def calculate_loss(self, predictions, actual_labels, sigma):
+        pred_mzs = predictions[:, :, 0]    # Predicted m/z values
+        pred_probabilities = predictions[:, :, 1]  # Predicted probabilities
+        pred_flags = predictions[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
+
+        # Split the actual_labels tensor into mzs and intensities
+        actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
+        actual_intensities = actual_labels[:, :, 1]  # Shape: (batch_size, max_fragments)
+
+        # Normalize actual intensities to form probabilities
+        actual_probabilities = actual_intensities / torch.sum(actual_intensities, dim=1, keepdim=True)
+
+        return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
+
+    def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
+        def gaussian_prediction(x, centers, heights, sigma):
+            return torch.sum(heights * torch.exp(-((x.unsqueeze(1) - centers.unsqueeze(2)) ** 2) / (2 * sigma ** 2)), dim=1)
+
+        batch_size = pred_mzs.shape[0]
+        max_len = max(pred_mzs.shape[1], actual_mzs.shape[1])
+        
+        # Pad tensors to have the same length
+        pred_mzs_padded = F.pad(pred_mzs, (0, max_len - pred_mzs.shape[1]))
+        pred_probabilities_padded = F.pad(pred_probabilities, (0, max_len - pred_probabilities.shape[1]))
+        actual_mzs_padded = F.pad(actual_mzs, (0, max_len - actual_mzs.shape[1]))
+        actual_probabilities_padded = F.pad(actual_probabilities, (0, max_len - actual_probabilities.shape[1]))
+
+        # Compute gaussian predictions for actual mzs
+        gaussian_pred_probabilities = gaussian_prediction(actual_mzs_padded, pred_mzs_padded, pred_probabilities_padded, sigma)
+        
+        # Clamp values to avoid zeros
+        gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
+
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities_padded, dim=1)
+        
+        # Convert similarity to loss (1 - similarity)
+        loss = 1 - similarity
+
+        return loss.mean()
+
+    def train(self, mode=True):
+        super(CustomChemBERTaModel, self).train(mode)
+        self.training_mode = mode
+
+    def eval(self):
+        super(CustomChemBERTaModel, self).eval()
+        self.training_mode = False
+
+    def reset_steps(self):
+        self.steps = 0
     
-    def evaluate_spectra(self, predicted_output, interleaved_labels, threshold=0.5):
+    def evaluate_spectra(self, predicted_output, labels, threshold=0.5):
         """
         Evaluate spectra using greedy cosine and hungarian cosine metrics, processing both 
-        the predicted output and the interleaved labels to extract m/z values and intensities.
+        the predicted output and the labels to extract m/z values and intensities.
         
         Parameters:
         - predicted_output: Tuple (pred_mz, pred_probs, pred_flags)
-        - interleaved_labels: Ground truth in interleaved format (m/z and intensities)
+        - labels: Ground truth labels Tuple(m/z, intensities)
         - threshold: A cutoff value for flags to zero out certain predictions.
         
         Returns:
-        - A dictionary with the greedy and Hungarian cosine scores.
+        - A dictionary with the greedy cosine score.
         """
 
         # Step 1: Process the predicted output
         pred_mz, pred_intensities = process_predicted_output(predicted_output, threshold)
 
-        # Step 2: Extract the ground truth m/z and intensities from interleaved labels
-        mz_true, intensities_true = extract_fragments_from_interleaved(interleaved_labels)
+        # Step 2: Extract the ground truth m/z and intensities from labels
+        mz_true, intensities_true = labels
 
         # Step 3: Calculate the metrics using the processed predicted and ground truth values
         greedy_score = greedy_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
@@ -311,12 +354,12 @@ def hungarian_cosine(mz_a, mz_b, intensities_a, intensities_b):
 
 
 if __name__ == "__main__":
-    # Example interleaved lists (padded and converted to tensors)
+    
 
     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     
     # Add the supplementary_data_dim parameter
-    MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=75)  # Adjust the value of supplementary_data_dim as needed
+    MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=81)  # Adjust the value of supplementary_data_dim as needed
 
     # print(MS_model)
 
@@ -324,14 +367,18 @@ if __name__ == "__main__":
     #     if param.requires_grad:
     #         print(f"{name} has shape {param.shape}")
     
-    pred_vect = torch.tensor([[338, 0.3, 1, 350, 0.01, 1, 253, 1, 1, 0, 0, 0, 0, 0, 0], 
-                              [350, 0.01, 1, 253, 1, 1, 338, 0.3, 1, 0, 0, 0, 0, 0, 0], 
-                              [0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]])
-    actual_vect = torch.tensor([[338, 0.3, 1, 350, 0.01, 1, 253, 1, 1, 0, 0, 0, 0, 0, 0], 
-                              [350, 0.01, 1, 253, 1, 1, 338, 0.3, 1, 0, 0, 0, 0, 0, 0]])
-    
+    pred_vect = torch.tensor([[[300, 400, 123, 5000], 
+                              [0, 0.25, 0.75, 0], 
+                              [0, 1, 1, 0]],
+                              [[300, 400, 123, 5000], 
+                              [0, 0.25, 0.75, 0], 
+                              [0, 1, 1, 0]]])
+    actual_vect = torch.tensor([[[300, 400, 123, 5000], 
+                              [0, 0.01, 0.99, 0]],
+                              [[300, 400, 123, 5000], 
+                              [0, 0.01, 0.99, 0]]])
 
-    loss_value = calculate_loss(pred_vect, actual_vect, sigma=0.1)
+    loss_value = calculate_loss(pred_vect, actual_vect, sigma=1)
     print(f"Loss: {loss_value}")
 
     

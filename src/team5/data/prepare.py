@@ -201,7 +201,7 @@ def tensorize(
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
-    tuple[torch.Tensor, torch.Tensor],
+    torch.Tensor,  # Changed this from tuple to tensor
     torch.Tensor,
 ]:
     filename = Path(f"{PREPARED_PARQUET}_{split}.parquet")
@@ -213,16 +213,19 @@ def tensorize(
     print(f"Reading prepared data from disk ({filename})")
     df = pl.read_parquet(filename)
 
+    # Concatenate mzs and intensities along the last dimension
+    labels = torch.cat(
+        (torch.tensor(df["padded_mzs"], dtype=torch.float).unsqueeze(-1),
+         torch.tensor(df["padded_intensities"], dtype=torch.float).unsqueeze(-1)),
+        dim=-1
+    )  # Shape: (batch_size, max_fragments, 2)
+
     return (
         torch.tensor(df["tokenized_smiles"], dtype=torch.long),
         torch.tensor(df["attention_mask"], dtype=torch.long),
-        (
-            torch.tensor(df["padded_mzs"], dtype=torch.float),
-            torch.tensor(df["padded_intensities"], dtype=torch.float),
-        ),
+        labels,  # Single tensor with mzs and intensities
         torch.tensor(df["supplementary_data"], dtype=torch.float),
     )
-
 
 if __name__ == "__main__":
     print(f"Only run this way for testing/debugging! This only reads {HEAD} rows.")
