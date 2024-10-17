@@ -92,7 +92,7 @@ RE_ORBI = re.compile(r"orbitrap|exactive|qehf", re.IGNORECASE)
 RE_FTMS = re.compile(r"tf|ion trap|qit", re.IGNORECASE)
 RE_QQQQ = re.compile(r"qq", re.IGNORECASE)
 
-# PREPARED_PARQUET = "prepared"
+PREPARED_PARQUET = "prepared"
 
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
@@ -153,7 +153,7 @@ def instrument(instr: str) -> list[int]:
     return [0, 0, 0, 0, 0]
 
 
-def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS) -> pl.DataFrame:
+def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS, filename: str = None) -> pl.DataFrame:
     """Prepares the dataframe by tokenizing SMILES,
     padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
@@ -250,10 +250,10 @@ def tensorize(
     # Check if the Parquet file already exists
     if filename.exists():
         print(f"Loading prepared data from {filename}")
-        df_prepared = pl.read_parquet(filename)
+        df = pl.read_parquet(filename)
     else:
         print(f"Preparing data for {split} split")
-        df_prepared = prepare_data(df, filename=filename)
+        df = prepare_data(df, filename=filename)
 
     # Optionally limit the dataset size for debugging
     if head > 0:
