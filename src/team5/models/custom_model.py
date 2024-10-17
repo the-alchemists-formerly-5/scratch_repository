@@ -89,58 +89,11 @@ class FinalLayers(nn.Module):
         return output
 
 
-# Example usage
-pred_mzs = torch.tensor([[100.0, 120.0, 89.0, 300.0]])
-pred_probabilities = torch.tensor([[0.3, 0.4, 0.1, 0.2]])
-actual_mzs = torch.tensor([[102.0, 127.0, 302.0, 90.0]])
-actual_probabilities = torch.tensor([[0.25, 0.4, 0.25, 0.1]])
-
-loss = gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities)
-print(f"Loss: {loss.item()}")
-
-def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
-    """
-    Computes the cross-entropy loss between the actual and predicted distributions using
-    Gaussian kernel density estimation with the log-sum-exp trick for numerical stability.
-
-    Parameters:
-    - actual_mzs: Tensor of shape (B, N_actual)
-    - actual_probabilities: Tensor of shape (B, N_actual)
-    - predicted_mzs: Tensor of shape (B, N_pred)
-    - predicted_probabilities: Tensor of shape (B, N_pred)
-    - sigma: Standard deviation of the Gaussian kernel (default: 1.0)
-
-    Returns:
-    - loss: Scalar tensor representing the cross-entropy loss
-    """
-    # Ensure the predicted probabilities are not zero to avoid log of zero
-    epsilon = 1e-10
-    predicted_probabilities = predicted_probabilities.clamp(min=epsilon)
-
-
-    # Compute the squared differences divided by sigma
-    D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / (2*sigma**2)
-
-    # Compute the log of predicted probabilities and reshape for broadcasting
-    log_predicted_probs = torch.log(predicted_probabilities).unsqueeze(1)
-
-    # Compute the terms inside the log-sum-exp
-    terms = log_predicted_probs - D
-
-    # Apply the log-sum-exp trick along the predicted mzs axis
-    log_p_predicted = torch.logsumexp(terms, dim=2)
-
-    # Compute the cross-entropy loss
-    loss = -torch.sum(actual_probabilities * log_p_predicted, dim=1)
-
-    loss = loss.mean()
-
-    return loss
 
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 initial_sigma=2.0, final_sigma=0.0001, eval_sigma=0.1):
+                 initial_sigma=2.0, final_sigma=0.0001, eval_sigma=0.1, total_steps=1000000):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
@@ -155,7 +108,7 @@ class CustomChemBERTaModel(nn.Module):
         self.initial_sigma = initial_sigma
         self.final_sigma = final_sigma
         self.eval_sigma = eval_sigma
-        self.total_steps = 1000000
+        self.total_steps = total_steps
         
         # Training mode flag
         self.training_mode = True
@@ -353,6 +306,45 @@ def hungarian_cosine(mz_a, mz_b, intensities_a, intensities_b):
 
 
 
+def gaussian_cross_entropy_loss(actual_mzs, actual_probabilities, predicted_mzs, predicted_probabilities, sigma=1.0):
+    """
+    Computes the cross-entropy loss between the actual and predicted distributions using
+    Gaussian kernel density estimation with the log-sum-exp trick for numerical stability.
+
+    Parameters:
+    - actual_mzs: Tensor of shape (B, N_actual)
+    - actual_probabilities: Tensor of shape (B, N_actual)
+    - predicted_mzs: Tensor of shape (B, N_pred)
+    - predicted_probabilities: Tensor of shape (B, N_pred)
+    - sigma: Standard deviation of the Gaussian kernel (default: 1.0)
+
+    Returns:
+    - loss: Scalar tensor representing the cross-entropy loss
+    """
+    # Ensure the predicted probabilities are not zero to avoid log of zero
+    epsilon = 1e-10
+    predicted_probabilities = predicted_probabilities.clamp(min=epsilon)
+
+
+    # Compute the squared differences divided by sigma
+    D = ((actual_mzs.unsqueeze(2) - predicted_mzs.unsqueeze(1)) ** 2) / (2*sigma**2)
+
+    # Compute the log of predicted probabilities and reshape for broadcasting
+    log_predicted_probs = torch.log(predicted_probabilities).unsqueeze(1)
+
+    # Compute the terms inside the log-sum-exp
+    terms = log_predicted_probs - D
+
+    # Apply the log-sum-exp trick along the predicted mzs axis
+    log_p_predicted = torch.logsumexp(terms, dim=2)
+
+    # Compute the cross-entropy loss
+    loss = -torch.sum(actual_probabilities * log_p_predicted, dim=1)
+
+    loss = loss.mean()
+
+    return loss
+
 if __name__ == "__main__":
     
 
@@ -377,8 +369,18 @@ if __name__ == "__main__":
                               [0, 0.01, 0.99, 0]],
                               [[300, 400, 123, 5000], 
                               [0, 0.01, 0.99, 0]]])
+    loss_value = MS_model.calculate_loss(pred_vect, actual_vect, sigma=1)
+    print(f"Loss: {loss_value}")
+    
+    # Example usage
+    pred_mzs = torch.tensor([[100.0, 120.0, 89.0, 300.0]])
+    pred_probabilities = torch.tensor([[0.3, 0.4, 0.1, 0.2]])
+    actual_mzs = torch.tensor([[102.0, 127.0, 302.0, 90.0]])
+    actual_probabilities = torch.tensor([[0.25, 0.4, 0.25, 0.1]])
 
-    loss_value = calculate_loss(pred_vect, actual_vect, sigma=1)
+
+
+    loss_value = MS_model.gaussian_cosine_loss(pred_mzs, pred_probabilities , actual_mzs, actual_probabilities, sigma=1)
     print(f"Loss: {loss_value}")
 
     
