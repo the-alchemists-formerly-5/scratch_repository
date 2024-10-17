@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sys
 from functools import partial
 from pathlib import Path
 
@@ -93,21 +92,26 @@ RE_ORBI = re.compile(r"orbitrap|exactive|qehf", re.IGNORECASE)
 RE_FTMS = re.compile(r"tf|ion trap|qit", re.IGNORECASE)
 RE_QQQQ = re.compile(r"qq", re.IGNORECASE)
 
-#PREPARED_PARQUET = "prepared"
+# PREPARED_PARQUET = "prepared"
 
 
 def _enumerize(parquet: Path, column: str) -> dict[str, int]:
     values = dict(
-        enumerate(pl.scan_parquet(parquet).select(column).unique().collect()[column].sort())
+        enumerate(
+            pl.scan_parquet(parquet).select(column).unique().collect()[column].sort()
+        )
     )
     return {v: k for k, v in values.items()}
 
 
 def pad(series: pl.Series, max_items: int) -> list[float]:
     """Pads the series with zeros up to the max_items length."""
-    items = series.to_list()
+    if series is None:
+        return [0.0] * max_items
+    items = series if isinstance(series, list) else series.to_list()
     padding = [0.0] * (max_items - len(items))
     return items + padding
+
 
 def vectorize(lookup: dict[str, int], elem: str) -> list[int]:
     """One-hot encodes an element based on the lookup dictionary."""
@@ -115,18 +119,20 @@ def vectorize(lookup: dict[str, int], elem: str) -> list[int]:
     vec[lookup[elem]] = 1
     return vec
 
+
 def tokenize_smiles(df: pl.DataFrame, tokenizer: AutoTokenizer) -> pl.DataFrame:
     """Tokenizes the SMILES column and adds attention masks."""
     return df.with_columns(
         tokenized_smiles=pl.col("smiles").map_elements(
             partial(tokenizer.encode, padding="max_length"),
-            return_dtype=pl.List(pl.Int64)
+            return_dtype=pl.List(pl.Int64),
         ),
         attention_mask=pl.col("smiles").map_elements(
             lambda seq: tokenizer(seq, padding="max_length")["attention_mask"],
-            return_dtype=pl.List(pl.Int64)
-        )
+            return_dtype=pl.List(pl.Int64),
+        ),
     )
+
 
 def instrument(instr: str) -> list[int]:
     """Groups instruments into predefined categories."""
@@ -148,45 +154,63 @@ def instrument(instr: str) -> list[int]:
 
 
 def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS) -> pl.DataFrame:
-    """Prepares the dataframe by tokenizing SMILES, padding mzs, and processing other columns."""
+    """Prepares the dataframe by tokenizing SMILES,
+    padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
-    
+
     # Apply transformations
     df_prepared = df.with_columns(
         # Padding mzs and intensities
         padded_mzs=pl.col("mzs").map_elements(
-            partial(pad, max_items=max_mzs), return_dtype=pl.List(pl.Float64)
+            partial(pad, max_items=max_mzs),
+            return_dtype=pl.List(pl.Float64),
+            skip_nulls=False,
         ),
         padded_intensities=pl.col("intensities").map_elements(
-            partial(pad, max_items=max_mzs), return_dtype=pl.List(pl.Float64)
+            partial(pad, max_items=max_mzs),
+            return_dtype=pl.List(pl.Float64),
+            skip_nulls=False,
         ),
         # Enum adduct
         enum_adduct=pl.col("adduct").map_elements(
-            partial(vectorize, ADDUCT), return_dtype=pl.List(pl.Int64)
+            partial(vectorize, ADDUCT),
+            return_dtype=pl.List(pl.Int64),
+            skip_nulls=False,
         ),
         # Collision energy extraction (fill missing values here)
-        ev=pl.col("collision_energy").str.extract_all(r"\d+\.?\d*").list.last().cast(pl.Float64).fill_null(0),
+        ev=pl.col("collision_energy")
+        .str.extract_all(r"\d+\.?\d*")
+        .list.last()
+        .cast(pl.Float64)
+        .fill_null(0),
         # Enum in_silico (fill missing values here)
         enum_in_silico=pl.col("in_silico").cast(pl.Int64).fill_null(0),
         # Instrument type grouping
         enum_instrument=pl.col("instrument_type").map_elements(
-            instrument, return_dtype=pl.List(pl.Int64)
-        )
+            instrument,
+            return_dtype=pl.List(pl.Int64),
+            skip_nulls=False,
+        ),
     )
-    
+
     # Tokenize SMILES and add attention masks
     df_prepared = tokenize_smiles(df_prepared, tokenizer)
-    
+
     # Combine supplementary data into a single column
     df_prepared = df_prepared.with_columns(
         supplementary_data=pl.concat_list(
-            "precursor_mz", "precursor_charge", "ev", "enum_in_silico", "enum_instrument", "enum_adduct"
+            "precursor_mz",
+            "precursor_charge",
+            "ev",
+            "enum_in_silico",
+            "enum_instrument",
+            "enum_adduct",
         )
     )
 
     # Fill any remaining missing values in supplementary_data with a default (e.g., 0)
     df_prepared = df_prepared.fill_null(0)
-    
+
     # Select final columns to return
     df_prepared = df_prepared.select(
         [
@@ -194,7 +218,7 @@ def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS) -> pl.DataFrame:
             "attention_mask",
             "padded_mzs",
             "padded_intensities",
-            "supplementary_data"
+            "supplementary_data",
         ]
     )
 
@@ -206,12 +230,12 @@ def tensorize(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Converts the prepared dataframe into PyTorch tensors for training/testing.
-    
+
     Args:
         df: Prepared Polars DataFrame.
         head: Number of rows to process (if limited for debugging).
         split: The dataset split ("train" or "test").
-    
+
     Returns:
         Tuple of tensors: tokenized_smiles, attention_mask, labels, supplementary_data.
     """
@@ -221,9 +245,13 @@ def tensorize(
 
     # Concatenate mzs and intensities along the last dimension
     labels = torch.cat(
-        (torch.tensor(df["padded_mzs"].to_list(), dtype=torch.float).unsqueeze(-1),
-         torch.tensor(df["padded_intensities"].to_list(), dtype=torch.float).unsqueeze(-1)),
-        dim=-1
+        (
+            torch.tensor(df["padded_mzs"].to_list(), dtype=torch.float).unsqueeze(-1),
+            torch.tensor(
+                df["padded_intensities"].to_list(), dtype=torch.float
+            ).unsqueeze(-1),
+        ),
+        dim=-1,
     )  # Shape: (batch_size, max_fragments, 2)
 
     # Return the tensors for model consumption
@@ -233,6 +261,7 @@ def tensorize(
         labels,  # Single tensor with mzs and intensities
         torch.tensor(df["supplementary_data"].to_list(), dtype=torch.float),
     )
+
 
 # ---------------------- TESTS START HERE -------------------------------
 
@@ -244,57 +273,125 @@ def sample_df():
         "mzs": [[100.0, 200.0], [150.0, 250.0], [180.0]],
         "intensities": [[0.1, 0.2], [0.3, 0.4], [0.5]],
         "precursor_mz": [100.0, 150.0, 180.0],
-        "precursor_charge": [1, 1, 1],
+        "precursor_charge": [1.0, 1.0, 1.0],
         "collision_energy": ["20", "25", None],
         "in_silico": [1, 1, 1],
         "instrument_type": ["TOF", "Orbitrap", "FTMS"],
-        "adduct": ["[M+H]+", "[M+Na]+", "[M+K]+"]
+        "adduct": ["[M+H]+", "[M+Na]+", "[M+K]+"],
     }
     return pl.DataFrame(data)
+
 
 def test_prepare_data():
     """Test the prepare_data function."""
     df = sample_df()
     prepared_df = prepare_data(df)
-    
+
     # Check if the necessary columns are present
-    required_columns = {"tokenized_smiles", "attention_mask", "padded_mzs", "padded_intensities", "supplementary_data"}
+    required_columns = {
+        "tokenized_smiles",
+        "attention_mask",
+        "padded_mzs",
+        "padded_intensities",
+        "supplementary_data",
+    }
     if set(prepared_df.columns) == required_columns:
         print("test_prepare_data: PASS (columns present)")
     else:
-        print(f"test_prepare_data: FAIL (missing columns {required_columns - set(prepared_df.columns)})")
-    
+        print(
+            f"test_prepare_data: FAIL (missing columns "
+            f"{required_columns - set(prepared_df.columns)})"
+        )
+
     # Ensure no missing values in the supplementary_data column
     if prepared_df["supplementary_data"].null_count() == 0:
         print("test_prepare_data: PASS (no missing values in supplementary_data)")
     else:
         print("test_prepare_data: FAIL (missing values in supplementary_data)")
 
+
 def test_tensorize():
     """Test the tensorize function."""
     df = sample_df()
     prepared_df = prepare_data(df)
     try:
-        tokenized_smiles, attention_mask, labels, supplementary_data = tensorize(prepared_df)
-        
+        tokenized_smiles, attention_mask, labels, supplementary_data = tensorize(
+            prepared_df
+        )
+
         # Check tensor types
-        if isinstance(tokenized_smiles, torch.Tensor) and isinstance(attention_mask, torch.Tensor) and \
-           isinstance(labels, torch.Tensor) and isinstance(supplementary_data, torch.Tensor):
+        if (
+            isinstance(tokenized_smiles, torch.Tensor)
+            and isinstance(attention_mask, torch.Tensor)
+            and isinstance(labels, torch.Tensor)
+            and isinstance(supplementary_data, torch.Tensor)
+        ):
             print("test_tensorize: PASS (tensor types are correct)")
         else:
             print("test_tensorize: FAIL (incorrect tensor types)")
-        
+
         # Check tensor shapes
-        if tokenized_smiles.shape[0] == df.shape[0] and attention_mask.shape[0] == df.shape[0] and \
-           labels.shape[0] == df.shape[0] and supplementary_data.shape[0] == df.shape[0]:
+        if (
+            tokenized_smiles.shape[0] == df.shape[0]
+            and attention_mask.shape[0] == df.shape[0]
+            and labels.shape[0] == df.shape[0]
+            and supplementary_data.shape[0] == df.shape[0]
+        ):
             print("test_tensorize: PASS (tensor shapes match batch size)")
         else:
             print("test_tensorize: FAIL (tensor shapes do not match batch size)")
-    
+
     except Exception as e:
         print(f"test_tensorize: FAIL (error occurred: {e})")
+
 
 if __name__ == "__main__":
     # Run the tests
     test_prepare_data()
     test_tensorize()
+
+    # List of parquet chunk files
+    chunk_files = [f"~/Downloads/chunk_{i+1}.parquet" for i in range(1)]
+
+    # Read and concatenate all parquet files
+    df = pl.concat([pl.read_parquet(file) for file in chunk_files])
+
+    from src.team5.data.data_split import (sort_dataframe_by_scaffold,
+                                           split_dataframe)
+
+    # Sort by scaffold
+    df_sorted = sort_dataframe_by_scaffold(df)
+
+    # Split the dataframe into train and test
+    df_train, df_test = split_dataframe(df_sorted, split_ratio=0.9)
+
+    # Prepare the training and testing data
+    # (this step creates 'padded_mzs' and other columns)
+    df_train_prepared = prepare_data(df_train)
+    df_test_prepared = prepare_data(df_test)
+
+    # Check column names to ensure 'padded_mzs' is included
+    print(df_train_prepared.columns)
+    print(df_test_prepared.columns)
+
+    # Run tensorization on prepared data
+    (
+        train_tokenized_smiles,
+        train_attention_mask,
+        train_labels,
+        train_supplementary_data,
+    ) = tensorize(df_train_prepared, split="train")
+    print(
+        "train_tokenized_smiles",
+        train_tokenized_smiles.shape,
+        train_tokenized_smiles.dtype,
+    )
+    print(
+        "train_attention_mask", train_attention_mask.shape, train_attention_mask.dtype
+    )
+    print("train_labels", train_labels.shape, train_labels.dtype)
+    print(
+        "train_supplementary_data",
+        train_supplementary_data.shape,
+        train_supplementary_data.dtype,
+    )
