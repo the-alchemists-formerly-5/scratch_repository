@@ -157,17 +157,12 @@ class CustomChemBERTaModel(nn.Module):
         # Training mode flag
         self.training_mode = True
 
-    def forward(self, *inputs, **kwargs):
-
-        # assert we're getting input_ids, attention_mask, supplementary_data, labels=None
-        assert len(inputs) == 3
-        assert 'labels' in kwargs
-
-        input_ids, attention_mask, supplementary_data = inputs
-        labels = kwargs['labels']
-
+    def forward(self, input_ids, attention_mask=None, supplementary_data=None, labels=None, **kwargs):
+        # get the last hidden state from the model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         last_hidden_state = outputs.hidden_states[-1]  
+
+        # Use the last hidden state as the input to the final layers
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)
         
         if self.training_mode:
