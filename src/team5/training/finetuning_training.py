@@ -1,16 +1,20 @@
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
 from config import *
 
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-from src.team5.data_preprocessing import preprocess_data
-from model_definition import create_custom_model
+from .data_preprocessing import preprocess_data
+from .model_definition import create_custom_model
+from .profiling import create_profiling_callback
 
-from profiling import create_profiling_callback
 
 def load_model_and_tokenizer():
     model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL)
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
     return model, tokenizer
+
+
 # Your main training code will go here
+
 
 def setup_device():
     num_gpus = torch.cuda.device_count()
@@ -30,9 +34,10 @@ def setup_device():
         print("Using CPU")
         device_type = "cpu"
         use_data_parallel = False
-    
+
     device = torch.device(device_type)
     return device, use_data_parallel
+
 
 def setup_wandb():
     wandb_enabled = os.getenv("WANDB_API_KEY") is not None
@@ -42,6 +47,7 @@ def setup_wandb():
         os.environ["WANDB_WATCH"] = "false"
     return wandb_enabled
 
+
 if __name__ == "__main__":
     print("Configuration loaded:")
     print(f"Dataset: {DATASET}")
@@ -50,10 +56,8 @@ if __name__ == "__main__":
     print(f"Number of Epochs: {NUM_EPOCHS}")
     print(f"Profiling Enabled: {ENABLE_PROFILING}")
 
-
     # Set up device
     device, use_data_parallel = setup_device()
-
 
     # Load model and tokenizer
     model, tokenizer = load_model_and_tokenizer()
@@ -81,14 +85,7 @@ if __name__ == "__main__":
             if param.requires_grad:
                 print(f"{name} is placed on {param.device}")
 
-    
     # Preprocess data
-    train_dataset, test_dataset = preprocess_data()
-    print("Data preprocessing completed.")
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Test dataset size: {len(test_dataset)}")
-
-     # Preprocess data
     train_dataset, test_dataset = preprocess_data()
     print("Data preprocessing completed.")
     print(f"Train dataset size: {len(train_dataset)}")
