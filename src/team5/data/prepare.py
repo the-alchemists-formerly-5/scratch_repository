@@ -153,7 +153,9 @@ def instrument(instr: str) -> list[int]:
     return [0, 0, 0, 0, 0]
 
 
-def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS, filename: str = None) -> pl.DataFrame:
+def prepare_data(
+    df: pl.DataFrame, max_mzs: int = MAX_MZS, filename="prepared"
+) -> pl.DataFrame:
     """Prepares the dataframe by tokenizing SMILES,
     padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
@@ -225,12 +227,12 @@ def prepare_data(df: pl.DataFrame, max_mzs: int = MAX_MZS, filename: str = None)
     # If a filename is provided, save the prepared data as a Parquet file
     if filename:
         df_prepared.sink_parquet(str(filename))
-    
+
     return df_prepared
 
 
 def tensorize(
-    df: pl.DataFrame, head: int = 0, split: str = "train", path = PREPARED_PARQUET
+    df: pl.DataFrame, head: int = 0, split: str = "train", path=PREPARED_PARQUET
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Converts the prepared dataframe into PyTorch tensors for training/testing.

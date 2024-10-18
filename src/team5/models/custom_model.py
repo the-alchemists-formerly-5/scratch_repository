@@ -11,88 +11,56 @@ import numpy as np
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
 
-        # Linear layer to process supplementary data
-        self.layer1 = nn.Linear(supplementary_data_dim, hidden_size)
-        self.activation1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(0.1)
-        self.layernorm1 = nn.LayerNorm(hidden_size)
+        # Process supplementary data
+        self.supp_layer = nn.Sequential(
+            nn.Linear(supplementary_data_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # Multihead cross-attention layer
-        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+        # Main processing layers
+        self.main_layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # Multihead self-attention layer
-        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
-
-        # Output linear layer to project to (b, max_fragments, 3)
-        self.output_linear = nn.Linear(hidden_size, 3)
-        self.dropout2 = nn.Dropout(0.1)
-        self.activation2 = nn.ReLU()
+        # Output layers
+        self.mz_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.ReLU()  # Ensure non-negative m/z values
+        )
+        self.prob_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.Sigmoid()  # Ensure probabilities are between 0 and 1
+        )
 
     def forward(self, x, supplementary_data, attention_mask):
-        # x: (batch_size, seq_length, hidden_size)
-        # supplementary_data: (batch_size, supplementary_data_dim)
-        # attention_mask: (batch_size, seq_length)
-
-        # Apply the attention mask to zero out padding tokens in x
-        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
-        x = x * expanded_mask  # Zero out padding tokens
-
-        # Process supplementary data to match hidden_size
-        supplementary_data = self.layer1(supplementary_data)  # Shape: (batch_size, hidden_size)
-        supplementary_data = self.dropout1(supplementary_data)
-        supplementary_data = self.layernorm1(supplementary_data)
-        supplementary_data = self.activation1(supplementary_data)
-
-        # Expand supplementary_data to match x's shape and add to x
-        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
-        x = x + supplementary_data_expanded
-
-        # Initialize y randomly with shape (batch_size, max_fragments, hidden_size)
-        batch_size, _, hidden_size = x.size()
-        y = torch.randn(batch_size, self.max_fragments, hidden_size, device=x.device, dtype=x.dtype)
-
-        # Create key_padding_mask for x (True where padding)
-        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
-
-        # Multihead cross-attention: query from y, key and value from x
-        y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
-        # y is updated after cross-attention
-
-        # Multihead self-attention on y
-        y, _ = self.self_attention(query=y, key=y, value=y)
-        # y is further updated after self-attention
-
-        # Project y to (batch_size, max_fragments, 3)
-        y = self.output_linear(y)
-        y = self.dropout2(y)
-        y = self.activation2(y)
-
-        # Split y into mzs, probs, and flags
-        mzs = y[:, :, 0]    # Shape: (batch_size, max_fragments)
-        probs = y[:, :, 1]  # Shape: (batch_size, max_fragments)
-        flags = y[:, :, 2]  # Shape: (batch_size, max_fragments)
-
-        # Apply sigmoid to flags to get values between 0 and 1
-        flags = torch.sigmoid(flags)
-
-        # Multiply mzs by flags
-        mzs = mzs * flags
-
-        # Adjust probs where flags are zero
-        probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
-
-        # Softmax on probs
-        probs = F.softmax(probs, dim=1)
-
-        # Stack together mzs, probs, and flags
-        output = torch.stack([mzs, probs, flags], dim=-1)
-
-        return output
+        # Process supplementary data
+        supp = self.supp_layer(supplementary_data).unsqueeze(1)
+        
+        # Combine with input and apply mask
+        x = x * attention_mask.unsqueeze(-1) + supp
+        
+        # Main processing
+        x = x + self.main_layers(x)  # Residual connection
+        
+        # Output
+        mzs = self.mz_output(x.mean(dim=1))  # Global average pooling
+        probs = self.prob_output(x.mean(dim=1))
+        
+        return torch.stack([mzs, probs], dim=-1)
 
 
 
@@ -107,8 +75,8 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, 
-                                        self.dim_supplementary_data, self.max_fragments, num_heads=8)
+        self.final_layers = FinalLayers(self.hidden_size, 
+                                        self.dim_supplementary_data, self.max_fragments)
         
         # Sigma scheduling parameters
         self.initial_sigma = initial_sigma
@@ -119,17 +87,12 @@ class CustomChemBERTaModel(nn.Module):
         # Training mode flag
         self.training_mode = True
 
-    def forward(self, *inputs, **kwargs):
-
-        # assert we're getting input_ids, attention_mask, supplementary_data, labels=None
-        assert len(inputs) == 3
-        assert 'labels' in kwargs
-
-        input_ids, attention_mask, supplementary_data = inputs
-        labels = kwargs['labels']
-
+    def forward(self, input_ids, attention_mask=None, supplementary_data=None, labels=None, **kwargs):
+        # get the last hidden state from the model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         last_hidden_state = outputs.hidden_states[-1]  
+
+        # Use the last hidden state as the input to the final layers
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)
         
         if self.training_mode:
@@ -149,8 +112,9 @@ class CustomChemBERTaModel(nn.Module):
     def extract_from_predicted_output(self, predicted_output):
         pred_mzs = predicted_output[:, :, 0]    # Predicted m/z values
         pred_probabilities = predicted_output[:, :, 1]  # Predicted probabilities
-        pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-        return pred_mzs, pred_probabilities, pred_flags
+        #pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
+        #return pred_mzs, pred_probabilities, pred_flags
+        return pred_mzs, pred_probabilities
     
     def extract_from_actual_labels(self, actual_labels):
         actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
@@ -160,10 +124,55 @@ class CustomChemBERTaModel(nn.Module):
 
     def calculate_loss(self, predictions, actual_labels, sigma):
 
-        pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
+        #pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
+        pred_mzs, pred_probabilities= self.extract_from_predicted_output(predictions)
         actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
-        return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
+        return self.gaussian_kl_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
+    def gaussian_kl_loss(self, predicted_mzs, predicted_probabilities, actual_mzs, actual_probabilities, sigma):
+        """
+        Compute KL divergence loss using Gaussian soft binning for batched input.
+        
+        :param actual_mzs: Tensor of shape [batch_size, n_actual_peaks] - true m/z values
+        :param actual_probabilities: Tensor of shape [batch_size, n_actual_peaks] - true probabilities
+        :param predicted_mzs: Tensor of shape [batch_size, n_predicted_peaks] - predicted m/z values
+        :param predicted_probabilities: Tensor of shape [batch_size, n_predicted_peaks] - predicted probabilities
+        :param sigma: Float - standard deviation for Gaussian kernel
+        :return: KL divergence loss
+        """
+
+        def soft_binning_custom_unnormalized(values, probs, actual_mzs, sigma=1):
+            """
+            Apply soft binning to a batch of distributions.
+            
+            :param values: Tensor of shape [batch_size, n_peaks] - m/z values
+            :param probs: Tensor of shape [batch_size, n_peaks] - probabilities
+            :param actual_mzs: Tensor of shape [batch_size, n_centers] - bin centers (actual m/z values)
+            :param sigma: Float - standard deviation for Gaussian kernel
+            :return: Tensor of shape [batch_size, n_centers] - soft-binned probabilities
+            """
+            # Compute differences: [batch_size, n_peaks, n_centers]
+            diff = values.unsqueeze(2) - actual_mzs.unsqueeze(1)
+            
+            # Compute Gaussian weights: [batch_size, n_peaks, n_centers]
+            weight = torch.exp(-0.5 * (diff / sigma)**2)
+            
+            # Apply weights to probabilities and sum: [batch_size, n_centers]
+            return (weight * probs.unsqueeze(2)).sum(dim=1)
+
+        # Apply soft binning to predicted distribution
+        Q = soft_binning_custom_unnormalized(predicted_mzs, predicted_probabilities, actual_mzs, sigma)
+        
+        # Clamp values to avoid log(0) issues
+        Q = Q.clamp(1e-10)
+        
+        # Calculate KL divergence
+        # actual_probabilities are used directly as they align with their own centers
+        kl_div = F.kl_div(Q.log(), actual_probabilities, reduction='none')
+        
+        # Sum over peaks and average over batch
+        return kl_div.sum(dim=1).mean()
+    
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
 
         print(f"pred_probabilities:\n {pred_probabilities}")
@@ -219,13 +228,14 @@ class CustomChemBERTaModel(nn.Module):
         """
 
         # Step 1: Process the predicted output
-        pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
+        #pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
+        pred_mz, pred_probs = self.extract_from_predicted_output(predicted_output)
         # Apply the threshold: if flag > 0.5, keep values, else zero them out
-        mask = (pred_flags > 0.5).float()
+        #mask = (pred_flags > 0.5).float()
 
         # Set values to zero where the flag is below the threshold
-        pred_mz = pred_mz * mask
-        pred_probs = pred_probs * mask
+        #pred_mz = pred_mz * mask
+        #pred_probs = pred_probs * mask
 
         # Step 2: Extract the ground truth m/z and intensities from labels
         mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
@@ -255,14 +265,14 @@ def process_predicted_output(predicted_output):
     - pred_mz: Processed predicted m/z values
     - pred_intensities: Normalized predicted intensities
     """
-    pred_mz, pred_probs, pred_flags = predicted_output
-
+    #pred_mz, pred_probs, pred_flags = predicted_output
+    pred_mz, pred_probs = predicted_output
     # Apply the threshold: if flag > 0.5, keep values, else zero them out
-    mask = (pred_flags > 0.5).float()
+    #mask = (pred_flags > 0.5).float()
 
     # Set values to zero where the flag is below the threshold
-    pred_mz = pred_mz * mask
-    pred_probs = pred_probs * mask
+    #pred_mz = pred_mz * mask
+    #pred_probs = pred_probs * mask
 
     # Renormalize the predicted intensities (pred_probs) so the maximum is 1
     max_intensity = torch.max(pred_probs, dim=1, keepdim=True).values
@@ -371,7 +381,9 @@ if __name__ == "__main__":
     attention_mask = input_encodings["attention_mask"]  # Attention mask
     supplementary_data = torch.randn(batch_size, SUPPLEMENTARY_DATA_DIM)  # Random supplementary data
     labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
-
+    with torch.no_grad():
+        loss, predicted_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
+        print(f"predicted_output shape: {predicted_output.shape}")
 
    # Create labels tensor
     mz_values = torch.randint(100, 401, (batch_size, MAX_FRAGMENTS))
@@ -384,7 +396,7 @@ if __name__ == "__main__":
     # Create pred_output tensor
     pred_mzs = mz_values
     pred_probabilities = probabilities
-    pred_flags = torch.rand((batch_size, MAX_FRAGMENTS))  # Random values between 0 and 1
+    pred_flags = torch.ones((batch_size, MAX_FRAGMENTS))  # All values set to 1
     pred_output = torch.stack([pred_mzs, pred_probabilities, pred_flags], dim=-1)
 
     print(f"pred_output shape: {pred_output.shape}")
@@ -422,4 +434,5 @@ if __name__ == "__main__":
     # # Perform spectra evaluation
     # evaluation_results = MS_model.evaluate_spectra(predicted_output, labels_for_eval)
     # print(f"Greedy cosine score: {evaluation_results['greedy_cosine']}")
+
 
