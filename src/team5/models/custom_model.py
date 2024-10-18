@@ -33,16 +33,17 @@ class FinalLayers(nn.Module):
             nn.Dropout(0.1)
         )
 
-        # Output to probabilites
-        self.process_hidden = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
+
+        # Project to a smaller dimension
+        self.project_hidden = nn.Sequential(
+            nn.Linear(hidden_size, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.1))
         
         # Output layers
         self.output_layers = nn.Sequential(
-            nn.Linear(hidden_size, num_bins),
+            nn.Linear(512, num_bins),
             nn.LayerNorm(num_bins),
             nn.ReLU()
         )
@@ -60,8 +61,8 @@ class FinalLayers(nn.Module):
         # Mean pooling of tokens
         x = x.mean(dim=1)
 
-        # Main processing of mzs
-        x = x + self.process_hidden(x) 
+        # Project to a smaller dimension
+        x = self.project_hidden(x) 
 
         # Output layers
         x = self.output_layers(x)
