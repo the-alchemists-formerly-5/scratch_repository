@@ -30,6 +30,7 @@ class FinalLayers(nn.Module):
         self.layernorm2 = nn.LayerNorm(hidden_size)
         self.dropout2 = nn.Dropout(0.1)
         self.activation2 = nn.GELU()
+        self.layernorm2_2 = nn.LayerNorm(hidden_size)
 
         # MLP after cross-attention
         self.mlp_fc1_cross = nn.Linear(hidden_size, 4 * hidden_size)
@@ -41,6 +42,7 @@ class FinalLayers(nn.Module):
         self.layernorm3 = nn.LayerNorm(hidden_size)
         self.dropout3 = nn.Dropout(0.1)
         self.activation3 = nn.GELU()
+        self.layernorm3_2 = nn.LayerNorm(hidden_size)
 
         # MLP after self-attention
         self.mlp_fc1_self = nn.Linear(hidden_size, 4 * hidden_size)
@@ -49,8 +51,8 @@ class FinalLayers(nn.Module):
 
         # Output linear layer to project to (b, max_fragments, 2)
         self.output_linear = nn.Linear(hidden_size, 2)
-        self.dropout2 = nn.Dropout(0.1)
-        self.activation2 = nn.GELU()
+        self.dropout_output = nn.Dropout(0.1)
+        self.activation_output = nn.GELU()
 
     def forward(self, x, supplementary_data, attention_mask):
         # x: (batch_size, seq_length, hidden_size)
@@ -90,7 +92,7 @@ class FinalLayers(nn.Module):
         delta_y = self.activation3(delta_y)
         delta_y = self.dropout3(delta_y)
         delta_y = self.mlp_fc2_cross(delta_y)
-        y = self.layernorm3(y + delta_y)
+        y = self.layernorm2_2(y + delta_y)
 
         # Multihead self-attention on y
         delta_y, _ = self.self_attention(query=y, key=y, value=y)
@@ -102,7 +104,7 @@ class FinalLayers(nn.Module):
         delta_y = self.activation3(delta_y)
         delta_y = self.dropout3(delta_y)
         delta_y = self.mlp_fc2_self(delta_y)
-        y = self.layernorm3(y + delta_y)
+        y = self.layernorm3_2(y + delta_y)
 
         # Project y to (batch_size, max_fragments, 2)
         y = self.output_linear(y)
