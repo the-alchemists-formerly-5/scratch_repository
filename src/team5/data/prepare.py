@@ -160,6 +160,7 @@ def prepare_data(
     padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
+    print(df.columns)
     # Apply transformations
     df_prepared = df.with_columns(
         # Padding mzs and intensities
@@ -226,13 +227,13 @@ def prepare_data(
 
     # If a filename is provided, save the prepared data as a Parquet file
     if filename:
-        df_prepared.sink_parquet(str(filename))
+        df_prepared.write_parquet(str(filename))
 
     return df_prepared
 
 
 def tensorize(
-    df: pl.DataFrame, head: int = 0, split: str = "train", path=PREPARED_PARQUET
+    df: pl.DataFrame, head: int = 0, split: str = "train"
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Converts the prepared dataframe into PyTorch tensors for training/testing.
@@ -245,17 +246,6 @@ def tensorize(
     Returns:
         Tuple of tensors: tokenized_smiles, attention_mask, labels, supplementary_data.
     """
-
-    # Define the filename for the prepared Parquet file
-    filename = Path(f"{PREPARED_PARQUET}_{split}.parquet")
-
-    # Check if the Parquet file already exists
-    if filename.exists():
-        print(f"Loading prepared data from {filename}")
-        df = pl.read_parquet(filename)
-    else:
-        print(f"Preparing data for {split} split")
-        df = prepare_data(df, filename=filename)
 
     # Optionally limit the dataset size for debugging
     if head > 0:

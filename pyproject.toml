@@ -13,11 +13,11 @@ readme = "README.md"
 train = "src.team5.training.finetuning_training:main"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.13"
 torch = "^2.4.1"
 pandas = "^2.2.3"
 pyarrow = "^17.0.0"
-numpy = "^2.1.2"
+numpy = ">1.22,<1.27"
 polars = "^1.9.0"
 rdkit = "^2024.3.5"
 matplotlib = "^3.9.2"

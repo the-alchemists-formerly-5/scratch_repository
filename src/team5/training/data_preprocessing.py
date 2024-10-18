@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import polars as pl
@@ -13,45 +14,53 @@ from .config import BATCH_SIZE, DATASET, NUM_EPOCHS
 def preprocess_data():
     # List of parquet chunk files
     data_dir = Path(DATASET).parent
-    chunk_files = list(data_dir.glob("chunk_*.parquet"))
+    train_prepared_file = os.path.join(Path(data_dir).parent, "prepared", "train.parquet")
+    test_prepared_file = os.path.join(Path(data_dir).parent, "prepared", "test.parquet")
 
-    print(f"Found {len(chunk_files)} chunk files.")
-
-    print(f"Looking for chunk files in: {data_dir}")
-    print(f"Found {len(chunk_files)} chunk files.")
-
-    if not chunk_files:
-        print("No chunk files found. Checking for a single parquet file.")
-        single_file = Path(DATASET)
-        if single_file.exists():
-            print(f"Found single parquet file: {single_file}")
-            df = pl.read_parquet(single_file)
-        else:
-            raise FileNotFoundError(
-                f"No data files found in {data_dir} or at {single_file}"
-            )
+    if os.path.exists(train_prepared_file) and os.path.exists(test_prepared_file):
+        print(f"Loading prepared data from {train_prepared_file} and {test_prepared_file}")
+        df_train_prepared = pl.read_parquet(train_prepared_file)
+        df_test_prepared = pl.read_parquet(test_prepared_file)
     else:
-        # Read and concatenate all parquet files
-        df = pl.concat([pl.read_parquet(file) for file in chunk_files])
+        chunk_files = list(data_dir.glob("chunk_*.parquet"))
 
-    print("Data loaded. Sample:")
-    print(df.head())
+        print(f"Looking for chunk files in: {data_dir}")
+        print(f"Found {len(chunk_files)} chunk files.")
 
-    # Sort by scaffold
-    df_sorted = sort_dataframe_by_scaffold(df)
+        if not chunk_files:
+            print("No chunk files found. Checking for a single parquet file.")
+            single_file = Path(DATASET)
+            if single_file.exists():
+                print(f"Found single parquet file: {single_file}")
+                df = pl.read_parquet(single_file)
+            else:
+                raise FileNotFoundError(
+                    f"No data files found in {data_dir} or at {single_file}"
+                )
+        else:
+            # Read and concatenate all parquet files
+            df = pl.concat([pl.read_parquet(file) for file in chunk_files])
 
-    # Split the dataframe into train and test
-    df_train, df_test = split_dataframe(df_sorted, split_ratio=0.9)
+        print("Data loaded. Sample:")
+        print(df.head())
 
-    # Prepare the training and testing data
-    df_train_prepared = prepare_data(df_train)
-    df_test_prepared = prepare_data(df_test)
+        # Sort by scaffold
+        df_sorted = sort_dataframe_by_scaffold(df)
 
-    print("Data prepared. Train columns:")
-    print(df_train_prepared.columns)
-    print("Test columns:")
-    print(df_test_prepared.columns)
+        df_filtered = df_sorted.filter(pl.col("mzs").list.max() <= 2000)
 
+        # Split the dataframe into train and test
+        df_train, df_test = split_dataframe(df_filtered, split_ratio=0.9)
+
+        # Prepare the training and testing data
+        df_train_prepared = prepare_data(df_train, filename=train_prepared_file)
+        df_test_prepared = prepare_data(df_test, filename=test_prepared_file)
+
+        print("Data prepared. Train columns:")
+        print(df_train_prepared.columns)
+        print("Test columns:")
+        print(df_test_prepared.columns)
+    
     # Run tensorization on prepared data
     (
         train_tokenized_smiles,
