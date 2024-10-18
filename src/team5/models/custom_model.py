@@ -162,8 +162,52 @@ class CustomChemBERTaModel(nn.Module):
 
         pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
         actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
-        return self.gaussian_cosine_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
+        return self.gaussian_kl_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
+    def gaussian_kl_loss(self, predicted_mzs, predicted_probabilities, actual_mzs, actual_probabilities, sigma):
+        """
+        Compute KL divergence loss using Gaussian soft binning for batched input.
+        
+        :param actual_mzs: Tensor of shape [batch_size, n_actual_peaks] - true m/z values
+        :param actual_probabilities: Tensor of shape [batch_size, n_actual_peaks] - true probabilities
+        :param predicted_mzs: Tensor of shape [batch_size, n_predicted_peaks] - predicted m/z values
+        :param predicted_probabilities: Tensor of shape [batch_size, n_predicted_peaks] - predicted probabilities
+        :param sigma: Float - standard deviation for Gaussian kernel
+        :return: KL divergence loss
+        """
+
+        def soft_binning_custom_unnormalized(values, probs, actual_mzs, sigma=1):
+            """
+            Apply soft binning to a batch of distributions.
+            
+            :param values: Tensor of shape [batch_size, n_peaks] - m/z values
+            :param probs: Tensor of shape [batch_size, n_peaks] - probabilities
+            :param actual_mzs: Tensor of shape [batch_size, n_centers] - bin centers (actual m/z values)
+            :param sigma: Float - standard deviation for Gaussian kernel
+            :return: Tensor of shape [batch_size, n_centers] - soft-binned probabilities
+            """
+            # Compute differences: [batch_size, n_peaks, n_centers]
+            diff = values.unsqueeze(2) - actual_mzs.unsqueeze(1)
+            
+            # Compute Gaussian weights: [batch_size, n_peaks, n_centers]
+            weight = torch.exp(-0.5 * (diff / sigma)**2)
+            
+            # Apply weights to probabilities and sum: [batch_size, n_centers]
+            return (weight * probs.unsqueeze(2)).sum(dim=1)
+
+        # Apply soft binning to predicted distribution
+        Q = soft_binning_custom_unnormalized(predicted_mzs, predicted_probabilities, actual_mzs, sigma)
+        
+        # Clamp values to avoid log(0) issues
+        Q = Q.clamp(1e-10)
+        
+        # Calculate KL divergence
+        # actual_probabilities are used directly as they align with their own centers
+        kl_div = F.kl_div(Q.log(), actual_probabilities, reduction='none')
+        
+        # Sum over peaks and average over batch
+        return kl_div.sum(dim=1).mean()
+    
     def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
 
         print(f"pred_probabilities:\n {pred_probabilities}")
@@ -384,7 +428,7 @@ if __name__ == "__main__":
     # Create pred_output tensor
     pred_mzs = mz_values
     pred_probabilities = probabilities
-    pred_flags = torch.rand((batch_size, MAX_FRAGMENTS))  # Random values between 0 and 1
+    pred_flags = torch.ones((batch_size, MAX_FRAGMENTS))  # All values set to 1
     pred_output = torch.stack([pred_mzs, pred_probabilities, pred_flags], dim=-1)
 
     print(f"pred_output shape: {pred_output.shape}")
@@ -422,4 +466,5 @@ if __name__ == "__main__":
     # # Perform spectra evaluation
     # evaluation_results = MS_model.evaluate_spectra(predicted_output, labels_for_eval)
     # print(f"Greedy cosine score: {evaluation_results['greedy_cosine']}")
+
 
