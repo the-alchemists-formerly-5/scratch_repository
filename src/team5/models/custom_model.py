@@ -11,126 +11,56 @@ import numpy as np
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
 
-        # Linear layer to process supplementary data
-        self.layer1 = nn.Linear(supplementary_data_dim, hidden_size)
-        self.activation1 = nn.GELU()
-        self.dropout1 = nn.Dropout(0.1)
-        self.layernorm1 = nn.LayerNorm(hidden_size)
+        # Process supplementary data
+        self.supp_layer = nn.Sequential(
+            nn.Linear(supplementary_data_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # Learnable initialization for y
-        self.y_init = nn.Parameter(torch.randn(1, max_fragments, hidden_size))
+        # Main processing layers
+        self.main_layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # Multihead cross-attention layer
-        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
-        self.layernorm2 = nn.LayerNorm(hidden_size)
-        self.dropout_cross = nn.Dropout(0.1)
-        self.activation_cross = nn.GELU()
-        self.layernorm_cross = nn.LayerNorm(hidden_size)
-
-        # MLP after cross-attention
-        self.mlp_fc1_cross = nn.Linear(hidden_size, 4 * hidden_size)
-        self.mlp_fc2_cross = nn.Linear(4 * hidden_size, hidden_size)
-
-
-        # Multihead self-attention layer
-        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
-        self.layernorm3 = nn.LayerNorm(hidden_size)
-        self.dropout_self = nn.Dropout(0.1)
-        self.activation_self = nn.GELU()
-        self.layernorm_self = nn.LayerNorm(hidden_size)
-
-        # MLP after self-attention
-        self.mlp_fc1_self = nn.Linear(hidden_size, 4 * hidden_size)
-        self.mlp_fc2_self = nn.Linear(4 * hidden_size, hidden_size)
-
-        # Output linear layer to project to (b, max_fragments, 2)
-        self.output_linear = nn.Linear(hidden_size, 2)
-        self.dropout_output = nn.Dropout(0.1)
-        self.activation_output = nn.GELU()
+        # Output layers
+        self.mz_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.ReLU()  # Ensure non-negative m/z values
+        )
+        self.prob_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.Sigmoid()  # Ensure probabilities are between 0 and 1
+        )
 
     def forward(self, x, supplementary_data, attention_mask):
-        # x: (batch_size, seq_length, hidden_size)
-        # supplementary_data: (batch_size, supplementary_data_dim)
-        # attention_mask: (batch_size, seq_length)
-
-        # Apply the attention mask to zero out padding tokens in x
-        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
-        x = x * expanded_mask  # Zero out padding tokens
-
-        # Process supplementary data to match hidden_size
-        supplementary_data = self.layer1(supplementary_data)  # Shape: (batch_size, hidden_size)
-        supplementary_data = self.dropout1(supplementary_data)
-        supplementary_data = self.layernorm1(supplementary_data)
-        supplementary_data = self.activation1(supplementary_data)
-
-        # Expand supplementary_data to match x's shape and add to x
-        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
-        x = x + supplementary_data_expanded
-
-        # Initialize y randomly with shape (batch_size, max_fragments, hidden_size)
-        batch_size, _, hidden_size = x.size()
-        y = self.y_init.expand(batch_size, -1, -1)
-    
-        # Create key_padding_mask for x (True where padding)
-        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
-
-        # Multihead cross-attention: query from y, key and value from x
-        delta_y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
-        # y is updated after cross-attention
-        # Apply residual connection and normalization for cross-attention
-        y = self.layernorm2(y + delta_y)
-
-        # MLP after cross-attention
-        delta_y = self.mlp_fc1_cross(y)
-        delta_y = self.activation_cross(delta_y)
-        delta_y = self.dropout_cross(delta_y)
-        delta_y = self.mlp_fc2_cross(delta_y)
-        y = self.layernorm_cross(y + delta_y)
-
-        # Multihead self-attention on y
-        delta_y, _ = self.self_attention(query=y, key=y, value=y)
-        # y is further updated after self-attention
-        y = self.layernorm3(y + delta_y)
-
-        # MLP after self-attention
-        delta_y = self.mlp_fc1_self(y)
-        delta_y = self.activation_self(delta_y)
-        delta_y = self.dropout_self(delta_y)
-        delta_y = self.mlp_fc2_self(delta_y)
-        y = self.layernorm_self(y + delta_y)
-
-        # Project y to (batch_size, max_fragments, 2)
-        y = self.output_linear(y)
-        y = self.dropout_output(y)
-        y = self.activation_output(y)
-
-        # Split y into mzs, probs, and flags
-        mzs = y[:, :, 0]    # Shape: (batch_size, max_fragments)
-        probs = y[:, :, 1]  # Shape: (batch_size, max_fragments)
-        #flags = y[:, :, 2]  # Shape: (batch_size, max_fragments)
-
-        # Apply sigmoid to flags to get values between 0 and 1
-        #flags = torch.sigmoid(flags)
-
-        # Multiply mzs by flags
-        #mzs = mzs * flags
-
-        # Adjust probs where flags are zero
-        #probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
-
-        # Softmax on probs
-        probs = F.softmax(probs, dim=1)
-
-        # Stack together mzs, probs, and flags
-        #output = torch.stack([mzs, probs, flags], dim=-1)
-        output = torch.stack([mzs, probs], dim=-1)
-
-        return output
+        # Process supplementary data
+        supp = self.supp_layer(supplementary_data).unsqueeze(1)
+        
+        # Combine with input and apply mask
+        x = x * attention_mask.unsqueeze(-1) + supp
+        
+        # Main processing
+        x = x + self.main_layers(x)  # Residual connection
+        
+        # Output
+        mzs = self.mz_output(x.mean(dim=1))  # Global average pooling
+        probs = self.prob_output(x.mean(dim=1))
+        
+        return torch.stack([mzs, probs], dim=-1)
 
 
 
@@ -145,8 +75,8 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, 
-                                        self.dim_supplementary_data, self.max_fragments, num_heads=8)
+        self.final_layers = FinalLayers(self.hidden_size, 
+                                        self.dim_supplementary_data, self.max_fragments)
         
         # Sigma scheduling parameters
         self.initial_sigma = initial_sigma
