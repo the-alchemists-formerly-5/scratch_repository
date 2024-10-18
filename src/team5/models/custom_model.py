@@ -21,17 +21,31 @@ class FinalLayers(nn.Module):
         self.activation1 = nn.GELU()
         self.dropout1 = nn.Dropout(0.1)
         self.layernorm1 = nn.LayerNorm(hidden_size)
-        self.layernorm2 = nn.LayerNorm(hidden_size)
-        self.layernorm3 = nn.LayerNorm(hidden_size)
 
         # Learnable initialization for y
         self.y_init = nn.Parameter(torch.randn(1, max_fragments, hidden_size))
 
         # Multihead cross-attention layer
         self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
+        self.layernorm2 = nn.LayerNorm(hidden_size)
+        self.dropout2 = nn.Dropout(0.1)
+        self.activation2 = nn.GELU()
+
+        # MLP after cross-attention
+        self.mlp_fc1_cross = nn.Linear(hidden_size, 4 * hidden_size)
+        self.mlp_fc2_cross = nn.Linear(4 * hidden_size, hidden_size)
+
 
         # Multihead self-attention layer
         self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
+        self.layernorm3 = nn.LayerNorm(hidden_size)
+        self.dropout3 = nn.Dropout(0.1)
+        self.activation3 = nn.GELU()
+
+        # MLP after self-attention
+        self.mlp_fc1_self = nn.Linear(hidden_size, 4 * hidden_size)
+        self.mlp_fc2_self = nn.Linear(4 * hidden_size, hidden_size)
+
 
         # Output linear layer to project to (b, max_fragments, 2)
         self.output_linear = nn.Linear(hidden_size, 2)
@@ -70,9 +84,24 @@ class FinalLayers(nn.Module):
         # y is updated after cross-attention
         # Apply residual connection and normalization for cross-attention
         y = self.layernorm2(y + delta_y)
+
+        # MLP after cross-attention
+        delta_y = self.mlp_fc1_cross(delta_y)
+        delta_y = self.activation3(delta_y)
+        delta_y = self.dropout3(delta_y)
+        delta_y = self.mlp_fc2_cross(delta_y)
+        y = self.layernorm3(y + delta_y)
+
         # Multihead self-attention on y
         delta_y, _ = self.self_attention(query=y, key=y, value=y)
         # y is further updated after self-attention
+        y = self.layernorm3(y + delta_y)
+
+        # MLP after self-attention
+        delta_y = self.mlp_fc1_self(delta_y)
+        delta_y = self.activation3(delta_y)
+        delta_y = self.dropout3(delta_y)
+        delta_y = self.mlp_fc2_self(delta_y)
         y = self.layernorm3(y + delta_y)
 
         # Project y to (batch_size, max_fragments, 2)
