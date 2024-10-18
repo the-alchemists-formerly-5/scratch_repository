@@ -28,9 +28,9 @@ class FinalLayers(nn.Module):
         # Multihead cross-attention layer
         self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
         self.layernorm2 = nn.LayerNorm(hidden_size)
-        self.dropout2 = nn.Dropout(0.1)
-        self.activation2 = nn.GELU()
-        self.layernorm2_2 = nn.LayerNorm(hidden_size)
+        self.dropout_cross = nn.Dropout(0.1)
+        self.activation_cross = nn.GELU()
+        self.layernorm_cross = nn.LayerNorm(hidden_size)
 
         # MLP after cross-attention
         self.mlp_fc1_cross = nn.Linear(hidden_size, 4 * hidden_size)
@@ -40,14 +40,13 @@ class FinalLayers(nn.Module):
         # Multihead self-attention layer
         self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
         self.layernorm3 = nn.LayerNorm(hidden_size)
-        self.dropout3 = nn.Dropout(0.1)
-        self.activation3 = nn.GELU()
-        self.layernorm3_2 = nn.LayerNorm(hidden_size)
+        self.dropout_self = nn.Dropout(0.1)
+        self.activation_self = nn.GELU()
+        self.layernorm_self = nn.LayerNorm(hidden_size)
 
         # MLP after self-attention
         self.mlp_fc1_self = nn.Linear(hidden_size, 4 * hidden_size)
         self.mlp_fc2_self = nn.Linear(4 * hidden_size, hidden_size)
-
 
         # Output linear layer to project to (b, max_fragments, 2)
         self.output_linear = nn.Linear(hidden_size, 2)
@@ -82,17 +81,16 @@ class FinalLayers(nn.Module):
 
         # Multihead cross-attention: query from y, key and value from x
         delta_y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
-        
         # y is updated after cross-attention
         # Apply residual connection and normalization for cross-attention
         y = self.layernorm2(y + delta_y)
 
         # MLP after cross-attention
-        delta_y = self.mlp_fc1_cross(delta_y)
-        delta_y = self.activation3(delta_y)
-        delta_y = self.dropout3(delta_y)
+        delta_y = self.mlp_fc1_cross(y)
+        delta_y = self.activation_cross(delta_y)
+        delta_y = self.dropout_cross(delta_y)
         delta_y = self.mlp_fc2_cross(delta_y)
-        y = self.layernorm2_2(y + delta_y)
+        y = self.layernorm_cross(y + delta_y)
 
         # Multihead self-attention on y
         delta_y, _ = self.self_attention(query=y, key=y, value=y)
@@ -100,16 +98,16 @@ class FinalLayers(nn.Module):
         y = self.layernorm3(y + delta_y)
 
         # MLP after self-attention
-        delta_y = self.mlp_fc1_self(delta_y)
-        delta_y = self.activation3(delta_y)
-        delta_y = self.dropout3(delta_y)
+        delta_y = self.mlp_fc1_self(y)
+        delta_y = self.activation_self(delta_y)
+        delta_y = self.dropout_self(delta_y)
         delta_y = self.mlp_fc2_self(delta_y)
-        y = self.layernorm3_2(y + delta_y)
+        y = self.layernorm_self(y + delta_y)
 
         # Project y to (batch_size, max_fragments, 2)
         y = self.output_linear(y)
-        y = self.dropout2(y)
-        y = self.activation2(y)
+        y = self.dropout_output(y)
+        y = self.activation_output(y)
 
         # Split y into mzs, probs, and flags
         mzs = y[:, :, 0]    # Shape: (batch_size, max_fragments)
@@ -458,7 +456,9 @@ if __name__ == "__main__":
     attention_mask = input_encodings["attention_mask"]  # Attention mask
     supplementary_data = torch.randn(batch_size, SUPPLEMENTARY_DATA_DIM)  # Random supplementary data
     labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
-
+    with torch.no_grad():
+        loss, predicted_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
+        print(f"predicted_output shape: {predicted_output.shape}")
 
    # Create labels tensor
     mz_values = torch.randint(100, 401, (batch_size, MAX_FRAGMENTS))
