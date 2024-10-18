@@ -1,7 +1,6 @@
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from config import *
-
+from .config import *
 from .data_preprocessing import preprocess_data
 from .model_definition import create_custom_model
 from .profiling import create_profiling_callback
@@ -48,7 +47,7 @@ def setup_wandb():
     return wandb_enabled
 
 
-if __name__ == "__main__":
+def main():
     print("Configuration loaded:")
     print(f"Dataset: {DATASET}")
     print(f"Base Model: {BASE_MODEL}")

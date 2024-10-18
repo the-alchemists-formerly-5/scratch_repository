@@ -1,6 +1,7 @@
 import os
 
 DATASET = os.getenv("DATASET", "../data/raw/enveda_library_subset_10percent.parquet")
+PREPARED_PARQUET = os.getenv("PREPARED_PARQUET", "../data/prepared")  # Add this line
 BASE_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
 MAX_FRAGMENTS = 512  # from anton, max number of mzs/intensities
 MAX_SEQ_LENGTH = 512  # base model max seq length
