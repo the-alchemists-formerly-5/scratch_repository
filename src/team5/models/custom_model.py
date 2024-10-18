@@ -28,8 +28,8 @@ class FinalLayers(nn.Module):
         # Multihead self-attention layer
         self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
 
-        # Output linear layer to project to (b, max_fragments, 3)
-        self.output_linear = nn.Linear(hidden_size, 3)
+        # Output linear layer to project to (b, max_fragments, 2)
+        self.output_linear = nn.Linear(hidden_size, 2)
         self.dropout2 = nn.Dropout(0.1)
         self.activation2 = nn.ReLU()
 
@@ -67,7 +67,7 @@ class FinalLayers(nn.Module):
         y, _ = self.self_attention(query=y, key=y, value=y)
         # y is further updated after self-attention
 
-        # Project y to (batch_size, max_fragments, 3)
+        # Project y to (batch_size, max_fragments, 2)
         y = self.output_linear(y)
         y = self.dropout2(y)
         y = self.activation2(y)
@@ -75,22 +75,23 @@ class FinalLayers(nn.Module):
         # Split y into mzs, probs, and flags
         mzs = y[:, :, 0]    # Shape: (batch_size, max_fragments)
         probs = y[:, :, 1]  # Shape: (batch_size, max_fragments)
-        flags = y[:, :, 2]  # Shape: (batch_size, max_fragments)
+        #flags = y[:, :, 2]  # Shape: (batch_size, max_fragments)
 
         # Apply sigmoid to flags to get values between 0 and 1
-        flags = torch.sigmoid(flags)
+        #flags = torch.sigmoid(flags)
 
         # Multiply mzs by flags
-        mzs = mzs * flags
+        #mzs = mzs * flags
 
         # Adjust probs where flags are zero
-        probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
+        #probs = probs + torch.log(flags + 1e-6)  # Add a small value to avoid log(0)
 
         # Softmax on probs
         probs = F.softmax(probs, dim=1)
 
         # Stack together mzs, probs, and flags
-        output = torch.stack([mzs, probs, flags], dim=-1)
+        #output = torch.stack([mzs, probs, flags], dim=-1)
+        output = torch.stack([mzs, probs], dim=-1)
 
         return output
 
@@ -149,8 +150,9 @@ class CustomChemBERTaModel(nn.Module):
     def extract_from_predicted_output(self, predicted_output):
         pred_mzs = predicted_output[:, :, 0]    # Predicted m/z values
         pred_probabilities = predicted_output[:, :, 1]  # Predicted probabilities
-        pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-        return pred_mzs, pred_probabilities, pred_flags
+        #pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
+        #return pred_mzs, pred_probabilities, pred_flags
+        return pred_mzs, pred_probabilities
     
     def extract_from_actual_labels(self, actual_labels):
         actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
@@ -160,7 +162,8 @@ class CustomChemBERTaModel(nn.Module):
 
     def calculate_loss(self, predictions, actual_labels, sigma):
 
-        pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
+        #pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
+        pred_mzs, pred_probabilities= self.extract_from_predicted_output(predictions)
         actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
         return self.gaussian_kl_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
 
@@ -263,13 +266,14 @@ class CustomChemBERTaModel(nn.Module):
         """
 
         # Step 1: Process the predicted output
-        pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
+        #pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
+        pred_mz, pred_probs = self.extract_from_predicted_output(predicted_output)
         # Apply the threshold: if flag > 0.5, keep values, else zero them out
-        mask = (pred_flags > 0.5).float()
+        #mask = (pred_flags > 0.5).float()
 
         # Set values to zero where the flag is below the threshold
-        pred_mz = pred_mz * mask
-        pred_probs = pred_probs * mask
+        #pred_mz = pred_mz * mask
+        #pred_probs = pred_probs * mask
 
         # Step 2: Extract the ground truth m/z and intensities from labels
         mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
@@ -299,14 +303,14 @@ def process_predicted_output(predicted_output):
     - pred_mz: Processed predicted m/z values
     - pred_intensities: Normalized predicted intensities
     """
-    pred_mz, pred_probs, pred_flags = predicted_output
-
+    #pred_mz, pred_probs, pred_flags = predicted_output
+    pred_mz, pred_probs = predicted_output
     # Apply the threshold: if flag > 0.5, keep values, else zero them out
-    mask = (pred_flags > 0.5).float()
+    #mask = (pred_flags > 0.5).float()
 
     # Set values to zero where the flag is below the threshold
-    pred_mz = pred_mz * mask
-    pred_probs = pred_probs * mask
+    #pred_mz = pred_mz * mask
+    #pred_probs = pred_probs * mask
 
     # Renormalize the predicted intensities (pred_probs) so the maximum is 1
     max_intensity = torch.max(pred_probs, dim=1, keepdim=True).values
