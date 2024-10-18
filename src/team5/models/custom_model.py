@@ -18,20 +18,25 @@ class FinalLayers(nn.Module):
 
         # Linear layer to process supplementary data
         self.layer1 = nn.Linear(supplementary_data_dim, hidden_size)
-        self.activation1 = nn.ReLU()
+        self.activation1 = nn.GELU()
         self.dropout1 = nn.Dropout(0.1)
         self.layernorm1 = nn.LayerNorm(hidden_size)
+        self.layernorm2 = nn.LayerNorm(hidden_size)
+        self.layernorm3 = nn.LayerNorm(hidden_size)
+
+        # Learnable initialization for y
+        self.y_init = nn.Parameter(torch.randn(1, max_fragments, hidden_size))
 
         # Multihead cross-attention layer
-        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
 
         # Multihead self-attention layer
-        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
 
         # Output linear layer to project to (b, max_fragments, 2)
         self.output_linear = nn.Linear(hidden_size, 2)
         self.dropout2 = nn.Dropout(0.1)
-        self.activation2 = nn.ReLU()
+        self.activation2 = nn.GELU()
 
     def forward(self, x, supplementary_data, attention_mask):
         # x: (batch_size, seq_length, hidden_size)
@@ -54,18 +59,21 @@ class FinalLayers(nn.Module):
 
         # Initialize y randomly with shape (batch_size, max_fragments, hidden_size)
         batch_size, _, hidden_size = x.size()
-        y = torch.randn(batch_size, self.max_fragments, hidden_size, device=x.device, dtype=x.dtype)
-
+        y = self.y_init.expand(batch_size, -1, -1)
+    
         # Create key_padding_mask for x (True where padding)
         key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
 
         # Multihead cross-attention: query from y, key and value from x
-        y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
+        delta_y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
+        
         # y is updated after cross-attention
-
+        # Apply residual connection and normalization for cross-attention
+        y = self.layernorm2(y + delta_y)
         # Multihead self-attention on y
-        y, _ = self.self_attention(query=y, key=y, value=y)
+        delta_y, _ = self.self_attention(query=y, key=y, value=y)
         # y is further updated after self-attention
+        y = self.layernorm3(y + delta_y)
 
         # Project y to (batch_size, max_fragments, 2)
         y = self.output_linear(y)
