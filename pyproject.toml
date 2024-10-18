@@ -9,6 +9,9 @@ authors = ["Your Name <you@example.com>"]
 license = "MIT License"
 readme = "README.md"
 
+[tool.poetry.scripts]
+train = "src.team5.training.finetuning_training:main"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 torch = "^2.4.1"
