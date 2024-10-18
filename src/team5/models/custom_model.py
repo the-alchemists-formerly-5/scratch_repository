@@ -11,11 +11,8 @@ import numpy as np
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, supplementary_data_dim, max_fragments):
+    def __init__(self, hidden_size, supplementary_data_dim, num_bins):
         super(FinalLayers, self).__init__()
-
-        self.max_fragments = max_fragments
-
         # Process supplementary data
         self.supp_layer = nn.Sequential(
             nn.Linear(supplementary_data_dim, hidden_size),
@@ -24,8 +21,8 @@ class FinalLayers(nn.Module):
             nn.Dropout(0.1)
         )
 
-        # Main processing layers
-        self.main_layers = nn.Sequential(
+        # Main processing of tokens 
+        self.main_layers_tokens = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.ReLU(),
@@ -36,14 +33,18 @@ class FinalLayers(nn.Module):
             nn.Dropout(0.1)
         )
 
+        # Output to probabilites
+        self.process_hidden = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1))
+        
         # Output layers
-        self.mz_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),
-            nn.ReLU()  # Ensure non-negative m/z values
-        )
-        self.prob_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),
-            nn.Sigmoid()  # Ensure probabilities are between 0 and 1
+        self.output_layers = nn.Sequential(
+            nn.Linear(hidden_size, num_bins),
+            nn.LayerNorm(num_bins),
+            nn.ReLU()
         )
 
     def forward(self, x, supplementary_data, attention_mask):
@@ -53,41 +54,47 @@ class FinalLayers(nn.Module):
         # Combine with input and apply mask
         x = x * attention_mask.unsqueeze(-1) + supp
         
-        # Main processing
-        x = x + self.main_layers(x)  # Residual connection
-        
-        # Output
-        mzs = self.mz_output(x.mean(dim=1))  # Global average pooling
-        probs = self.prob_output(x.mean(dim=1))
-        
-        return torch.stack([mzs, probs], dim=-1)
+        # Main processing of tokens
+        x = x + self.main_layers_tokens(x)  # Residual connection
+
+        # Mean pooling of tokens
+        x = x.mean(dim=1)
+
+        # Main processing of mzs
+        x = x + self.process_hidden(x) 
+
+        # Output layers
+        x = self.output_layers(x)
+
+        return x
 
 
 
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 initial_sigma=2.0, final_sigma=0.0001, eval_sigma=0.1, total_steps=1000000):
+                 max_mz=2000, delta_mz=0.1, intensity_power=0.5):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
         self.max_seq_length = max_seq_length
-        self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.final_layers = FinalLayers(self.hidden_size, 
-                                        self.dim_supplementary_data, self.max_fragments)
+        self.max_mz = max_mz
+        self.delta_mz = delta_mz
+        self.intensity_power = intensity_power
+        self.num_bins = int(max_mz / delta_mz)
         
-        # Sigma scheduling parameters
-        self.initial_sigma = initial_sigma
-        self.final_sigma = final_sigma
-        self.eval_sigma = eval_sigma
-        self.total_steps = total_steps
+        self.mz_weights = torch.linspace(0, 1, self.num_bins)
+        
+        self.final_layers = FinalLayers(self.hidden_size, 
+                                        self.dim_supplementary_data, 
+                                        self.num_bins)
         
         # Training mode flag
         self.training_mode = True
 
-    def forward(self, input_ids, attention_mask=None, supplementary_data=None, labels=None, **kwargs):
+    def forward(self, input_ids, attention_mask=None, supplementary_data=None, labels=None):
         # get the last hidden state from the model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         last_hidden_state = outputs.hidden_states[-1]  
@@ -95,113 +102,55 @@ class CustomChemBERTaModel(nn.Module):
         # Use the last hidden state as the input to the final layers
         predicted_output = self.final_layers(last_hidden_state, supplementary_data, attention_mask)
         
-        if self.training_mode:
-            # Schedule sigma only during training
-            sigma = self.initial_sigma - (self.initial_sigma - self.final_sigma) * (self.steps / self.total_steps)
-            self.steps += 1
-        else:
-            # Use final sigma during evaluation
-            sigma = self.eval_sigma
-        
         if labels is not None:
-            loss = self.calculate_loss(predicted_output, labels, sigma=sigma)
+            loss = self.calculate_loss(predicted_output, labels)
             return loss, predicted_output
         else:
             return predicted_output
         
-    def extract_from_predicted_output(self, predicted_output):
-        pred_mzs = predicted_output[:, :, 0]    # Predicted m/z values
-        pred_probabilities = predicted_output[:, :, 1]  # Predicted probabilities
-        #pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-        #return pred_mzs, pred_probabilities, pred_flags
-        return pred_mzs, pred_probabilities
     
     def extract_from_actual_labels(self, actual_labels):
         actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
         actual_intensities = actual_labels[:, :, 1]  # Shape: (batch_size, max_fragments)
-        actual_probabilities = actual_intensities / (torch.sum(actual_intensities, dim=1, keepdim=True) + 1e-8)
-        return actual_mzs, actual_intensities, actual_probabilities
+        return actual_mzs, actual_intensities
 
-    def calculate_loss(self, predictions, actual_labels, sigma):
-
-        #pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
-        pred_mzs, pred_probabilities= self.extract_from_predicted_output(predictions)
-        actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
-        return self.gaussian_kl_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma)
-
-    def gaussian_kl_loss(self, predicted_mzs, predicted_probabilities, actual_mzs, actual_probabilities, sigma):
-        """
-        Compute KL divergence loss using Gaussian soft binning for batched input.
+    def calculate_loss(self, predictions, actual_labels):
+        pred_intensities = predictions  # Shape: (batch_size, num_bins)
+        actual_mzs, actual_intensities = self.extract_from_actual_labels(actual_labels)
         
-        :param actual_mzs: Tensor of shape [batch_size, n_actual_peaks] - true m/z values
-        :param actual_probabilities: Tensor of shape [batch_size, n_actual_peaks] - true probabilities
-        :param predicted_mzs: Tensor of shape [batch_size, n_predicted_peaks] - predicted m/z values
-        :param predicted_probabilities: Tensor of shape [batch_size, n_predicted_peaks] - predicted probabilities
-        :param sigma: Float - standard deviation for Gaussian kernel
-        :return: KL divergence loss
-        """
-
-        def soft_binning_custom_unnormalized(values, probs, actual_mzs, sigma=1):
-            """
-            Apply soft binning to a batch of distributions.
-            
-            :param values: Tensor of shape [batch_size, n_peaks] - m/z values
-            :param probs: Tensor of shape [batch_size, n_peaks] - probabilities
-            :param actual_mzs: Tensor of shape [batch_size, n_centers] - bin centers (actual m/z values)
-            :param sigma: Float - standard deviation for Gaussian kernel
-            :return: Tensor of shape [batch_size, n_centers] - soft-binned probabilities
-            """
-            # Compute differences: [batch_size, n_peaks, n_centers]
-            diff = values.unsqueeze(2) - actual_mzs.unsqueeze(1)
-            
-            # Compute Gaussian weights: [batch_size, n_peaks, n_centers]
-            weight = torch.exp(-0.5 * (diff / sigma)**2)
-            
-            # Apply weights to probabilities and sum: [batch_size, n_centers]
-            return (weight * probs.unsqueeze(2)).sum(dim=1)
-
-        # Apply soft binning to predicted distribution
-        Q = soft_binning_custom_unnormalized(predicted_mzs, predicted_probabilities, actual_mzs, sigma)
+        print(f"Predictions shape: {pred_intensities.shape}")
+        print(f"Actual m/z shape: {actual_mzs.shape}")
+        print(f"Actual intensities shape: {actual_intensities.shape}")
         
-        # Clamp values to avoid log(0) issues
-        Q = Q.clamp(1e-10)
+        # Bin the actual intensities
+        binned_actual = self.bin_intensities(actual_mzs, actual_intensities)
         
-        # Calculate KL divergence
-        # actual_probabilities are used directly as they align with their own centers
-        kl_div = F.kl_div(Q.log(), actual_probabilities, reduction='none')
+        print(f"Binned actual shape: {binned_actual.shape}")
         
-        # Sum over peaks and average over batch
-        return kl_div.sum(dim=1).mean()
-    
-    def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
+        # Apply intensity power
+        pred_intensities_pow = pred_intensities ** self.intensity_power
+        binned_actual_pow = binned_actual ** self.intensity_power
+        
+        # Normalize
+        pred_intensities_norm = pred_intensities_pow / pred_intensities_pow.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        binned_actual_norm = binned_actual_pow / binned_actual_pow.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        
+        # Ensure mz_weights is the correct shape
+        mz_weights = self.mz_weights.to(pred_intensities.device)
+        if mz_weights.shape[0] != pred_intensities.shape[1]:
+            mz_weights = torch.linspace(0, 1, pred_intensities.shape[1], device=pred_intensities.device)
+        
+        # Compute loss
+        loss = ((pred_intensities_norm - binned_actual_norm).square() * mz_weights).sum(dim=1).mean()
+        
+        return loss
 
-        print(f"pred_probabilities:\n {pred_probabilities}")
-        print(f"actual_probabilities:\n {actual_probabilities}")
+    def bin_intensities(self, mzs, intensities):
+        bin_indices = (mzs / self.delta_mz).long().clamp(min=0, max=self.num_bins-1)
+        binned = torch.zeros(intensities.shape[0], self.num_bins, device=intensities.device)
+        binned.scatter_add_(1, bin_indices, intensities)
+        return binned
 
-        def gaussian_prediction(x, centers, heights, sigma):
-            x = x.unsqueeze(2)
-            centers = centers.unsqueeze(1)
-            heights = heights.unsqueeze(1)
-            
-            gauss = torch.exp(-((x - centers) ** 2) / (2 * sigma ** 2))
-            
-            result = torch.sum(heights * gauss, dim=2)
-            print(f"result: \n {result}")
-            return result
-
-        # Compute gaussian predictions for actual mzs
-        gaussian_pred_probabilities = gaussian_prediction(actual_mzs, pred_mzs, pred_probabilities, sigma)
-
-        # Clamp values to avoid zeros
-        gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
-
-        # Compute cosine similarity
-        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities, dim=1)
-
-        # Convert similarity to loss (1 - similarity)
-        loss = 1 - similarity
-
-        return loss.mean()
 
     def train(self, mode=True):
         super(CustomChemBERTaModel, self).train(mode)
@@ -215,70 +164,65 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
     
     def evaluate_spectra(self, predicted_output, labels):
-        """
-        Evaluate spectra using greedy cosine and hungarian cosine metrics, processing both 
-        the predicted output and the labels to extract m/z values and intensities.
+        pred_intensities = predicted_output
+        actual_mzs, actual_intensities = self.extract_from_actual_labels(labels)
         
-        Parameters:
-        - predicted_output: Tuple (pred_mz, pred_probs, pred_flags)
-        - labels: Ground truth labels Tuple(m/z, intensities)
+        # Convert binned predictions back to discrete peaks
+        pred_mzs = torch.linspace(0, self.max_mz, self.num_bins, device=pred_intensities.device)
+        pred_mzs = pred_mzs.unsqueeze(0).expand(pred_intensities.shape[0], -1)
         
-        Returns:
-        - A dictionary with the greedy cosine score.
-        """
-
-        # Step 1: Process the predicted output
-        #pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
-        pred_mz, pred_probs = self.extract_from_predicted_output(predicted_output)
-        # Apply the threshold: if flag > 0.5, keep values, else zero them out
-        #mask = (pred_flags > 0.5).float()
-
-        # Set values to zero where the flag is below the threshold
-        #pred_mz = pred_mz * mask
-        #pred_probs = pred_probs * mask
-
-        # Step 2: Extract the ground truth m/z and intensities from labels
-        mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
-
-        # Step 3: Calculate the metrics using the processed predicted and ground truth values, for each sample in the batch, then average
+        # Find top K peaks
+        K = min(self.max_fragments, self.num_bins)
+        top_k_values, top_k_indices = torch.topk(pred_intensities, k=K, dim=1)
+        pred_mzs = torch.gather(pred_mzs, 1, top_k_indices)
+        pred_intensities = top_k_values
+        
+        # Compute greedy cosine similarity
         greedy_scores = []
-        for i in range(pred_mz.shape[0]):
-            greedy_score = greedy_cosine(pred_mz[i], mz_true[i], pred_probs[i], probabilities_true[i])
+        for i in range(pred_mzs.shape[0]):
+            greedy_score = greedy_cosine(pred_mzs[i], actual_mzs[i], pred_intensities[i], actual_intensities[i])
             greedy_scores.append(greedy_score)
         greedy_score = sum(greedy_scores) / len(greedy_scores)
-        #hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
-
-        return {
-            'greedy_score': greedy_score,
-        }
+        
+        return {'greedy_score': greedy_score}
 
 
-def process_predicted_output(predicted_output):
-    """
-    Processes the predicted output to extract m/z values and intensities.
-    
-    Parameters:
-    - predicted_output: Tuple containing predicted m/z, predicted probabilities (for intensities), and flags
-    - threshold: A cutoff value for the flags. If flag > threshold, the corresponding m/z and intensity are set to zero.
-    
-    Returns:
-    - pred_mz: Processed predicted m/z values
-    - pred_intensities: Normalized predicted intensities
-    """
-    #pred_mz, pred_probs, pred_flags = predicted_output
-    pred_mz, pred_probs = predicted_output
-    # Apply the threshold: if flag > 0.5, keep values, else zero them out
-    #mask = (pred_flags > 0.5).float()
+    def process_predicted_output(self, predicted_output, probability_cutoff=0.01):
+        """
+        Processes the predicted output to extract m/z values and intensities,
+        applying a probability cutoff.
 
-    # Set values to zero where the flag is below the threshold
-    #pred_mz = pred_mz * mask
-    #pred_probs = pred_probs * mask
+        Parameters:
+        - predicted_output: Tensor of shape (batch_size, num_bins) containing binned intensities
+        - probability_cutoff: Minimum probability to keep a peak (default: 0.01)
 
-    # Renormalize the predicted intensities (pred_probs) so the maximum is 1
-    max_intensity = torch.max(pred_probs, dim=1, keepdim=True).values
-    pred_intensities = torch.where(max_intensity > 0, pred_probs / max_intensity, torch.zeros_like(pred_probs))
-    
-    return pred_mz, pred_intensities
+        Returns:
+        - pred_mz: Processed predicted m/z values
+        - pred_intensities: Normalized predicted intensities
+        """
+        pred_intensities = predicted_output
+
+        # Create m/z values corresponding to bin centers
+        pred_mz = torch.linspace(0, self.max_mz, self.num_bins, device=pred_intensities.device)
+        pred_mz = pred_mz.unsqueeze(0).expand(pred_intensities.shape[0], -1)
+
+        # Normalize intensities
+        max_intensity = torch.max(pred_intensities, dim=1, keepdim=True).values
+        pred_intensities = torch.where(max_intensity > 0, 
+                                    pred_intensities / max_intensity, 
+                                    torch.zeros_like(pred_intensities))
+
+        # Apply probability cutoff
+        mask = pred_intensities >= probability_cutoff
+        pred_mz = pred_mz * mask
+        pred_intensities = pred_intensities * mask
+
+        # Remove zero entries
+        non_zero_mask = pred_intensities.sum(dim=1) != 0
+        pred_mz = [mz[mask] for mz, mask in zip(pred_mz, non_zero_mask)]
+        pred_intensities = [intensities[mask] for intensities, mask in zip(pred_intensities, non_zero_mask)]
+
+        return pred_mz, pred_intensities
 
 
 def create_spectrum(mz, intensities):
@@ -334,21 +278,6 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
 
 # ----- Testing -----
 
-
-# if __name__ == "__main__":
-    
-
-#     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
-    
-#     # Add the supplementary_data_dim parameter
-#     MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=81)  # Adjust the value of supplementary_data_dim as needed
-
-#     print(MS_model)
-
-#     for name, param in MS_model.named_parameters():
-#         if param.requires_grad:
-#             print(f"{name} has shape {param.shape}")
-    
 if __name__ == "__main__":
     print("Testing")
 
@@ -374,42 +303,79 @@ if __name__ == "__main__":
         return_tensors="pt", 
         max_length=MAX_SEQ_LENGTH  # Explicitly define max sequence length
     )
-    #print(f"input_encodings: {input_encodings}")
-    print(f" shape of input_encodings: {input_encodings['input_ids'].shape}")
+    print(f"shape of input_encodings: {input_encodings['input_ids'].shape}")
 
     input_ids = input_encodings["input_ids"]  # Token IDs
     attention_mask = input_encodings["attention_mask"]  # Attention mask
     supplementary_data = torch.randn(batch_size, SUPPLEMENTARY_DATA_DIM)  # Random supplementary data
-    labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
+
+    # Create labels tensor
+    mz_values = torch.randint(1, int(custom_model.max_mz), (batch_size, MAX_FRAGMENTS))
+    intensities = torch.rand((batch_size, MAX_FRAGMENTS))
+    labels = torch.stack([mz_values, intensities], dim=-1)
+
+    print(f"labels shape: {labels.shape}")
+
+    # Forward pass
     with torch.no_grad():
         loss, predicted_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
         print(f"predicted_output shape: {predicted_output.shape}")
 
-   # Create labels tensor
-    mz_values = torch.randint(100, 401, (batch_size, MAX_FRAGMENTS))
-    intensities = torch.rand((batch_size, MAX_FRAGMENTS))
-    probabilities = intensities / intensities.sum(dim=1, keepdim=True)  # Normalize to sum to 1 for each batch
-    labels = torch.stack([mz_values, probabilities], dim=-1)
-
-    print(f"labels shape: {labels.shape}")
-
-    # Create pred_output tensor
-    pred_mzs = mz_values
-    pred_probabilities = probabilities
-    pred_flags = torch.ones((batch_size, MAX_FRAGMENTS))  # All values set to 1
-    pred_output = torch.stack([pred_mzs, pred_probabilities, pred_flags], dim=-1)
-
-    print(f"pred_output shape: {pred_output.shape}")
-
     # Calculate loss
-    sigma = 0.00001
-    loss = custom_model.calculate_loss(pred_output, labels, sigma=sigma)
+    loss = custom_model.calculate_loss(predicted_output, labels)
     print(f"Loss value: {loss.item()}")
 
     # Evaluate spectra
-    evaluation_score = custom_model.evaluate_spectra(pred_output, labels)
+    evaluation_score = custom_model.evaluate_spectra(predicted_output, labels)
     print(f"Evaluation score: {evaluation_score}")
 
+    # After your existing test code
+    perfect_pred = custom_model.bin_intensities(labels[:,:,0], labels[:,:,1])
+    perfect_loss = custom_model.calculate_loss(perfect_pred, labels)
+    print(f"Loss for perfect prediction: {perfect_loss.item()}")
+
+    def test_simple_cases(custom_model):
+        # Set up a simple scenario with 3 peaks
+        batch_size = 1
+        num_peaks = 3
+        max_mz = 1000
+        delta_mz = 1  # 1 Da bins for simplicity
+
+        custom_model.max_mz = max_mz
+        custom_model.delta_mz = delta_mz
+        custom_model.num_bins = int(max_mz / delta_mz)
+        custom_model.mz_weights = torch.linspace(0, 1, custom_model.num_bins)
+
+        # Case 1: Perfect match
+        mz_values = torch.tensor([[100, 500, 900]])
+        intensities = torch.tensor([[0.2, 0.5, 0.3]])
+        labels = torch.stack([mz_values, intensities], dim=-1)
+        
+        pred_intensities = custom_model.bin_intensities(mz_values, intensities)
+        loss = custom_model.calculate_loss(pred_intensities, labels)
+        print(f"Loss for perfect match: {loss.item()}")
+
+        # Case 2: Slight mismatch
+        pred_intensities_slight_mismatch = pred_intensities.clone()
+        pred_intensities_slight_mismatch[0, 100] = 0.25  # Change 0.2 to 0.25
+        pred_intensities_slight_mismatch[0, 500] = 0.45  # Change 0.5 to 0.45
+        loss = custom_model.calculate_loss(pred_intensities_slight_mismatch, labels)
+        print(f"Loss for slight mismatch: {loss.item()}")
+
+        # Case 3: Large mismatch
+        pred_intensities_large_mismatch = torch.zeros_like(pred_intensities)
+        pred_intensities_large_mismatch[0, [200, 600, 800]] = torch.tensor([0.3, 0.4, 0.3])
+        loss = custom_model.calculate_loss(pred_intensities_large_mismatch, labels)
+        print(f"Loss for large mismatch: {loss.item()}")
+
+        # Case 4: All intensity in one wrong bin
+        pred_intensities_one_bin = torch.zeros_like(pred_intensities)
+        pred_intensities_one_bin[0, 300] = 1.0
+        loss = custom_model.calculate_loss(pred_intensities_one_bin, labels)
+        print(f"Loss for all intensity in one wrong bin: {loss.item()}")
+
+    # Call the function in your main testing section
+    test_simple_cases(custom_model)
 
     # # Test the loss calculation
     # print(f"Loss value: {loss.item()}")
