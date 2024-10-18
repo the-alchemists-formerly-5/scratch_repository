@@ -6,10 +6,10 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 
-from .config import *
-from .data_preprocessing import preprocess_data
-from .lora_config import create_peft_model
-from .model_definition import create_custom_model
+from src.team5.training.config import *
+from src.team5.training.data_preprocessing import preprocess_data
+from src.team5.training.lora_config import create_peft_model
+from src.team5.training.model_definition import create_custom_model
 
 
 def load_model_and_tokenizer():
@@ -54,21 +54,21 @@ def setup_wandb():
 
 
 def main():
-    print("Configuration loaded:")
-    print(f"Dataset: {DATASET}")
-    print(f"Base Model: {BASE_MODEL}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Number of Epochs: {NUM_EPOCHS}")
-
     os.environ["WANDB_API_KEY"] = "69f075ac6ff5b82fb8e32313942465d0a23c6ead"
 
     # Setup Weights & Biases
     wandb_enabled = setup_wandb()
 
-    if not wandb_enabled:
-        print("WANDB_API_KEY not set. Skipping Weights & Biases.")
-
     accelerator = Accelerator(log_with="wandb" if wandb_enabled else None)
+
+    if not wandb_enabled:
+        accelerator.print("WANDB_API_KEY not set. Skipping Weights & Biases.")
+
+    accelerator.print("Configuration loaded:")
+    accelerator.print(f"Dataset: {DATASET}")
+    accelerator.print(f"Base Model: {BASE_MODEL}")
+    accelerator.print(f"Batch Size: {BATCH_SIZE}")
+    accelerator.print(f"Number of Epochs: {NUM_EPOCHS}")
 
     accelerator.init_trackers(
         project_name="hackathon",
@@ -83,17 +83,17 @@ def main():
 
     # Load model and tokenizer
     model, tokenizer = load_model_and_tokenizer()
-    print("Model and tokenizer loaded successfully.")
+    accelerator.print("Model and tokenizer loaded successfully.")
     # Add your training logic here
 
     # Create custom model
     custom_model = create_custom_model(model)
-    print("Custom model created successfully.")
+    accelerator.print("Custom model created successfully.")
 
     # Create PEFT model
     peft_model = create_peft_model(custom_model)
     peft_model = peft_model.to(device)
-    print("PEFT model created successfully and moved to device.")
+    accelerator.print("PEFT model created successfully and moved to device.")
 
     # Ensure all parameters are on the correct device
     for param in peft_model.parameters():
@@ -103,13 +103,13 @@ def main():
         # Print where each tensor is placed
         for name, param in peft_model.named_parameters():
             if param.requires_grad:
-                print(f"{name} is placed on {param.device}")
+                accelerator.print(f"{name} is placed on {param.device}")
 
     # Preprocess data
     train_dataset, test_dataset, _ = preprocess_data()
-    print("Data preprocessing completed.")
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Test dataset size: {len(test_dataset)}")
+    accelerator.print("Data preprocessing completed.")
+    accelerator.print(f"Train dataset size: {len(train_dataset)}")
+    accelerator.print(f"Test dataset size: {len(test_dataset)}")
 
     optimizer = AdamW(peft_model.parameters(), lr=LEARNING_RATE)
 
@@ -129,14 +129,12 @@ def main():
         num_training_steps=num_training_steps
     )
 
-    progress_bar = tqdm(range(num_training_steps))
-
     output_dir = data_dir.parent.parent / "checkpoints" / f"model_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Start training
-    print("Starting training...")
-    print(f"Output directory: {output_dir}")
+    accelerator.print("Starting training...")
+    accelerator.print(f"Output directory: {output_dir}")
     peft_model.train()
     for epoch in range(NUM_EPOCHS):
         for step, batch in enumerate(train_dataloader):
@@ -147,19 +145,18 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-            progress_bar.update(1)
             if step % 50 == 0:
                 accelerator.log({
                     "train_loss": loss.detach().float()
                 }, step=step)
-                print(f"step {step}, loss: {loss.detach().float():.6f}")
+                accelerator.print(f"step {step}/{num_training_steps}, loss: {loss.detach().float():.6f}")
 
-        output_dir = f"step_{step}"
-        output_dir = os.path.join(output_dir, output_dir)
-        accelerator.save_state(output_dir)
+        step_dir = f"step_{step}"
+        saving_dir = os.path.join(output_dir, step_dir)
+        accelerator.save_state(saving_dir)
 
         peft_model.eval()
-        print(f"Starting evaluation for epoch {epoch}...")
+        accelerator.print(f"Starting evaluation for epoch {epoch}...")
         total_eval_loss = 0
         num_eval_steps = 0
         for step, batch in enumerate(eval_dataloader):
@@ -171,13 +168,15 @@ def main():
         accelerator.log({
             "eval_loss": mean_eval_loss,
         }, step=step)
-        print(f"\n\nepoch {epoch}, eval loss: {mean_eval_loss:.6f}\n\n")
+        accelerator.print(f"\n\nepoch {epoch}, eval loss: {mean_eval_loss:.6f}\n\n")
 
     accelerator.end_training()
 
-    print("Training completed.")
+    accelerator.print("Training completed.")
 
 
-# First run accelerate config, then run accelerate check, then run using: accelerate launch finetuning_training.py
+# First run: export NCCL_P2P_DISABLE=1
+# then: export PYTHONPATH=$PYTHONPATH:`pwd` (from scratch_repository)
+# then run: accelerate check, then run using: accelerate launch src/team5/training/finetuning_training.py
 if __name__ == "__main__":
     main()

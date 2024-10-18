@@ -14,7 +14,7 @@ MAX_SEQ_LENGTH = 512  # base model max seq length
 SUPPLEMENTARY_DATA_DIM = 81
 ENABLE_PROFILING = False  # If turned on, will profile the training
 BATCH_SIZE = int(
-    os.getenv("BATCH_SIZE", 32)
+    os.getenv("BATCH_SIZE", 64)
 )  # Note: if using CUDA, it'll automatically find the optimal batch size
 NUM_EPOCHS = int(os.getenv("NUM_EPOCHS", 3))
 LEARNING_RATE = float(os.getenv("LEARNING_RATE", 1e-4))
