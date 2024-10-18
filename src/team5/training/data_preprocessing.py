@@ -17,8 +17,22 @@ def preprocess_data():
 
     print(f"Found {len(chunk_files)} chunk files.")
 
-    # Read and concatenate all parquet files
-    df = pl.concat([pl.read_parquet(file) for file in chunk_files])
+    print(f"Looking for chunk files in: {data_dir}")
+    print(f"Found {len(chunk_files)} chunk files.")
+
+    if not chunk_files:
+        print("No chunk files found. Checking for a single parquet file.")
+        single_file = Path(DATASET)
+        if single_file.exists():
+            print(f"Found single parquet file: {single_file}")
+            df = pl.read_parquet(single_file)
+        else:
+            raise FileNotFoundError(
+                f"No data files found in {data_dir} or at {single_file}"
+            )
+    else:
+        # Read and concatenate all parquet files
+        df = pl.concat([pl.read_parquet(file) for file in chunk_files])
 
     print("Data loaded. Sample:")
     print(df.head())

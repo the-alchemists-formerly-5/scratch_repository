@@ -1,5 +1,11 @@
 import os
+from pathlib import Path
 
+# Get the current file's directory
+current_dir = Path(__file__).parent.resolve()
+
+# Set the path to the data directory
+data_dir = current_dir.parent.parent.parent / "data" / "raw"
 DATASET = os.getenv("DATASET", "../data/raw/enveda_library_subset_10percent.parquet")
 PREPARED_PARQUET = os.getenv("PREPARED_PARQUET", "../data/prepared")  # Add this line
 BASE_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
@@ -14,3 +20,7 @@ NUM_EPOCHS = int(os.getenv("NUM_EPOCHS", 3))
 
 # Set WANDB_API_KEY environment variable to enable logging to wandb
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+
+print(f"DATASET path: {DATASET}")
+print(f"PREPARED_PARQUET path: {PREPARED_PARQUET}")
