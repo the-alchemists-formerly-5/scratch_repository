@@ -1,6 +1,6 @@
-from config import MAX_FRAGMENTS, MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM
+from src.team5.models.custom_model import CustomChemBERTaModel
 
-from .models.custom_model import CustomChemBERTaModel
+from .config import MAX_FRAGMENTS, MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM
 
 
 def create_custom_model(base_model):

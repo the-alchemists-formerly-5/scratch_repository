@@ -1,7 +1,9 @@
+import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 from .config import *
 from .data_preprocessing import preprocess_data
+from .lora_config import create_peft_model
 from .model_definition import create_custom_model
 from .profiling import create_profiling_callback
 
