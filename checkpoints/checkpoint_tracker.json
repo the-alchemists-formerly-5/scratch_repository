@@ -1,0 +1,14 @@
+{
+    "latest": "v0.1",
+    "checkpoints": [
+      {
+        "version": "v0.1",
+        "date": "2024-10-18_22_34",
+        "description": "Initial model",
+        "performance": {
+          "accuracy": 0.85,
+          "f1_score": 0.83
+        }
+      }
+    ]
+  }
