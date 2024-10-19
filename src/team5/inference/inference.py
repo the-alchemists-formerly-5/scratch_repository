@@ -155,6 +155,8 @@ def main():
         try:
             plot_sample_results(model, input_data, tokenizer, n_samples=5)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"Error plotting sample results: {e}")
             print("Make sure the model has the expected structure and methods.")
 
