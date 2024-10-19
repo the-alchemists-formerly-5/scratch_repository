@@ -35,8 +35,8 @@ class FinalLayers(nn.Module):
         self.attention_query = nn.Linear(hidden_size, 1)
 
         # MLP after attention pooling
-        self.mlp_fc1 = nn.Linear(hidden_size, 4 * hidden_size)
-        self.mlp_fc2 = nn.Linear(4 * hidden_size, hidden_size)
+        self.mlp_fc1 = nn.Linear(hidden_size, hidden_size)
+        self.mlp_fc2 = nn.Linear(hidden_size, hidden_size)
         self.mlp_activation = nn.GELU()
         self.mlp_dropout = nn.Dropout(0.1)
         self.mlp_norm = nn.LayerNorm(hidden_size)
