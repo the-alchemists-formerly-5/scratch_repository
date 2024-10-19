@@ -250,9 +250,9 @@ The relative error is used for m/z values because it provides a measure of the e
 
 For each corresponding pair of true and predicted m/z values, the relative error is calculated as:
 
-$$
+$
 \text{Relative Error (m/z)} = \frac{|\text{m/z}_\text{true} - \text{m/z}_\text{predicted}|}{\text{m/z}_\text{true}}
-$$
+$
 
 Where:
 - $\text{m/z}_\text{true}$ is the true m/z value
@@ -264,9 +264,9 @@ The absolute error is used for intensities because intensities are typically nor
 
 For each corresponding pair of true and predicted intensities, the absolute error is calculated as:
 
-$$
+$
 \text{Absolute Error (intensity)} = |\text{intensity}_\text{true} - \text{intensity}_\text{predicted}|
-$$
+$
 
 Where:
 - $\text{intensity}_\text{true}$ is the true intensity value
@@ -284,9 +284,9 @@ Where:
 
 3. Calculate summary statistics:
    - Mean m/z relative error:
-     $$\text{Mean m/z Relative Error} = \frac{1}{N} \sum_{i=1}^{N} \text{Relative Error (m/z)}_i$$
+     $\text{Mean m/z Relative Error} = \frac{1}{N} \sum_{i=1}^{N} \text{Relative Error (m/z)}_i$
    - Mean intensity absolute error:
-     $$\text{Mean Intensity Absolute Error} = \frac{1}{N} \sum_{i=1}^{N} \text{Absolute Error (intensity)}_i$$
+     $\text{Mean Intensity Absolute Error} = \frac{1}{N} \sum_{i=1}^{N} \text{Absolute Error (intensity)}_i$
 
    Where $N$ is the total number of peak comparisons across all spectra.
 
