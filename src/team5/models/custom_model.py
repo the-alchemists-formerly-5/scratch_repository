@@ -18,7 +18,7 @@ class ClampedReLU(nn.Module):
         return torch.clamp(F.relu(x), max=self.max_value)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, supplementary_data_dim, max_fragments, num_heads, mz_max_value=2000, prob_threshold=1e-4):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments, mz_max_value=2000, prob_threshold=1e-4):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
@@ -31,23 +31,19 @@ class FinalLayers(nn.Module):
         self.supplementary_dropout = nn.Dropout(0.1)
         self.supplementary_norm = nn.LayerNorm(hidden_size)
 
-        # Multihead cross-attention layer
-        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
-        self.cross_attention_norm = nn.LayerNorm(hidden_size)
-        self.cross_attention_dropout = nn.Dropout(0.1)
-        self.cross_attention_activation = nn.GELU()
-        self.cross_attention_final_norm = nn.LayerNorm(hidden_size)
+        # Attention pooling
+        self.attention_query = nn.Linear(hidden_size, 1)
 
-        # MLP after cross-attention
-        self.cross_attention_mlp_fc1 = nn.Linear(hidden_size, 4 * hidden_size)
-        self.cross_attention_mlp_fc2 = nn.Linear(4 * hidden_size, hidden_size)
-
-        # Compress the hidden size to 50
-        self.compress_hidden_size = nn.Linear(hidden_size, 64)
+        # MLP after attention pooling
+        self.mlp_fc1 = nn.Linear(hidden_size, 4 * hidden_size)
+        self.mlp_fc2 = nn.Linear(4 * hidden_size, hidden_size)
+        self.mlp_activation = nn.GELU()
+        self.mlp_dropout = nn.Dropout(0.1)
+        self.mlp_norm = nn.LayerNorm(hidden_size)
 
         # Output linear layers
-        self.output_linear_mz = nn.Linear(4096, self.max_fragments)
-        self.output_linear_prob = nn.Linear(4096, self.max_fragments)
+        self.output_linear_mz = nn.Linear(hidden_size, self.max_fragments)
+        self.output_linear_prob = nn.Linear(hidden_size, self.max_fragments)
         
         # Activation for m/z values
         self.mz_activation = ClampedReLU(max_value=mz_max_value)
@@ -57,63 +53,41 @@ class FinalLayers(nn.Module):
         # supplementary_data: (batch_size, supplementary_data_dim)
         # attention_mask: (batch_size, seq_length)
 
-        # Apply the attention mask to zero out padding tokens in x
-        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
-        x = x * expanded_mask  # Shape: (batch_size, seq_length, hidden_size)
-
-        # Process supplementary data to match hidden_size
-        supplementary_data = self.supplementary_linear(supplementary_data)  # Shape: (batch_size, hidden_size)
+        # Process supplementary data
+        supplementary_data = self.supplementary_linear(supplementary_data)
         supplementary_data = self.supplementary_dropout(supplementary_data)
         supplementary_data = self.supplementary_norm(supplementary_data)
         supplementary_data = self.supplementary_activation(supplementary_data)
 
-        # Expand supplementary_data to match x's shape and add to x
-        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
-        x = x + supplementary_data_expanded  # Shape: (batch_size, seq_length, hidden_size)
+        # Attention pooling
+        attention_scores = self.attention_query(x).squeeze(-1)  # (batch_size, seq_length)
+        attention_scores = attention_scores.masked_fill(attention_mask == 0, float('-inf'))
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        pooled = torch.bmm(attention_weights.unsqueeze(1), x).squeeze(1)  # (batch_size, hidden_size)
 
-        # Initialize y with zeros
-        batch_size = x.size(0)
-        y = torch.zeros(batch_size, 64, self.hidden_size, device=x.device)  # Shape: (batch_size, 64, hidden_size)
-    
-        # Create key_padding_mask for x (True where padding)
-        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
+        # Add supplementary data
+        pooled = pooled + supplementary_data
 
-        # Multihead cross-attention: query from y, key and value from x
-        delta_y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
-        # delta_y shape: (batch_size, 64, hidden_size)
-        
-        # Apply residual connection and normalization for cross-attention
-        y = self.cross_attention_norm(y + delta_y)  # Shape: (batch_size, 64, hidden_size)
-
-        # MLP after cross-attention
-        delta_y = self.cross_attention_mlp_fc1(y)
-        delta_y = self.cross_attention_activation(delta_y)
-        delta_y = self.cross_attention_dropout(delta_y)
-        delta_y = self.cross_attention_mlp_fc2(delta_y)
-        y = self.cross_attention_final_norm(y + delta_y)  # Shape: (batch_size, 64, hidden_size)
-
-        # Compress the hidden size to 64
-        y = self.compress_hidden_size(y)
-
-        # Stack y to have shape (batch_size, 64, 64) -> (batch_size, 4096)
-        y = y.view(batch_size, -1)
+        # MLP
+        y = self.mlp_fc1(pooled)
+        y = self.mlp_activation(y)
+        y = self.mlp_dropout(y)
+        y = self.mlp_fc2(y)
+        y = self.mlp_norm(pooled + y)  # residual connection
 
         # Project y to get m/z values and probabilities
-        mzs = self.output_linear_mz(y) # Shape: (batch_size, 512)
-        probs = self.output_linear_prob(y)  # Shape: (batch_size, 512)
-
+        mzs = self.output_linear_mz(y)  # Shape: (batch_size, max_fragments)
+        probs = self.output_linear_prob(y)  # Shape: (batch_size, max_fragments)
 
         # Apply activations
-        mzs = self.mz_activation(mzs)  # Shape: (batch_size, max_fragments)
-        probs = F.softmax(probs, dim=1)  # Shape: (batch_size, max_fragments)
+        mzs = self.mz_activation(mzs)
+        probs = F.softmax(probs, dim=1)
 
         # Create a mask for probabilities above the threshold
         mask = probs > self.prob_threshold
 
-        # Apply the mask to probabilities
+        # Apply the mask to probabilities and renormalize
         probs = probs * mask.float()
-
-        # Renormalize the probabilities
         probs = probs / (probs.sum(dim=1, keepdim=True) + 1e-10)
 
         # Apply the mask to m/z values
@@ -128,7 +102,7 @@ class FinalLayers(nn.Module):
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
                  initial_sigma=1.0, final_sigma=1.0, eval_sigma=1.0, total_steps=1000000, 
-                 prob_threshold=1e-4, mz_max_value=2000, num_heads=8):
+                 prob_threshold=1e-4, mz_max_value=2000):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
@@ -138,12 +112,10 @@ class CustomChemBERTaModel(nn.Module):
         self.dim_supplementary_data = supplementary_data_dim
         self.mz_max_value = mz_max_value
         self.prob_threshold = prob_threshold
-        self.num_heads = num_heads
         self.final_layers = FinalLayers(
             hidden_size=self.hidden_size, 
             supplementary_data_dim=self.dim_supplementary_data, 
             max_fragments=self.max_fragments, 
-            num_heads=self.num_heads,
             mz_max_value=self.mz_max_value,
             prob_threshold=self.prob_threshold
         )
