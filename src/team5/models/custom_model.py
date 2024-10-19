@@ -1,5 +1,4 @@
 import logging
-
 import torch.nn as nn
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
@@ -10,11 +9,21 @@ import numpy as np
 
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
+class ClampedReLU(nn.Module):
+    def __init__(self, min_value, max_value):
+        super().__init__()
+        self.min_value = min_value
+        self.max_value = max_value
+    
+    def forward(self, x):
+        return torch.clamp(F.relu(x), min=self.min_value, max=self.max_value)
+
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, supplementary_data_dim, max_fragments):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments, max_seq_length, mz_max_value=2000):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
+        self.hidden_size = hidden_size
 
         # Process supplementary data
         self.supp_layer = nn.Sequential(
@@ -36,15 +45,15 @@ class FinalLayers(nn.Module):
             nn.Dropout(0.1)
         )
 
+        # Sequence to fragment conversion
+        self.seq_to_frag = nn.Linear(max_seq_length, max_fragments)
+
         # Output layers
-        self.mz_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),
-            nn.ReLU()  # Ensure non-negative m/z values
-        )
-        self.prob_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),
-            nn.Sigmoid()  # Ensure probabilities are between 0 and 1
-        )
+        self.mz_output = nn.Linear(hidden_size, 1)
+        self.prob_output = nn.Linear(hidden_size, 1)
+
+        # ClampedReLU for m/z values
+        self.clamped_relu = ClampedReLU(min_value=0, max_value=mz_max_value)
 
     def forward(self, x, supplementary_data, attention_mask):
         # Process supplementary data
@@ -55,11 +64,30 @@ class FinalLayers(nn.Module):
         
         # Main processing
         x = x + self.main_layers(x)  # Residual connection
-        
-        # Output
-        mzs = self.mz_output(x.mean(dim=1))  # Global average pooling
-        probs = self.prob_output(x.mean(dim=1))
-        
+
+        # Rearrange dimensions: (batch_size, max_seq_length, hidden_size) -> (batch_size, hidden_size, max_seq_length)
+        #x = einops.rearrange(x, 'b s h -> b h s')
+        # but I don't want to figure out importing einops
+        x = x.transpose(1, 2)
+
+        # Apply linear layer to convert from max_seq_length to max_fragments
+        x = self.seq_to_frag(x)
+
+        # Rearrange back: (batch_size, hidden_size, max_fragments) -> (batch_size, max_fragments, hidden_size)
+        #x = einops.rearrange(x, 'b h f -> b f h')
+        # but I don't want to figure out importing einops
+        x = x.permute(0, 2, 1)
+
+        # Apply linear layers to get mz and prob for each fragment
+        mzs = self.mz_output(x).squeeze(-1)
+        probs = self.prob_output(x).squeeze(-1)
+
+        # Apply ClampedReLU to m/z values
+        mzs = self.clamped_relu(mzs)
+
+        # Normalize probabilities
+        probs = F.softmax(probs, dim=-1)
+
         return torch.stack([mzs, probs], dim=-1)
 
 
@@ -75,8 +103,12 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.final_layers = FinalLayers(self.hidden_size, 
-                                        self.dim_supplementary_data, self.max_fragments)
+        self.mz_max_value = 2000
+        self.final_layers = FinalLayers(hidden_size=self.hidden_size, 
+                           supplementary_data_dim=self.dim_supplementary_data, 
+                           max_fragments=self.max_fragments, 
+                           max_seq_length=self.max_seq_length, 
+                           mz_max_value=self.mz_max_value)
         
         # Sigma scheduling parameters
         self.initial_sigma = initial_sigma
@@ -376,7 +408,7 @@ def test_model():
 
     # Add noise to create "predicted" data
     sigma_mz = 1.0
-    sigma_prob = 0.1
+    sigma_prob = 0.2
     noisy_mz = mz_values + torch.randn_like(mz_values) * sigma_mz
     noisy_prob = probabilities + torch.randn_like(probabilities) * sigma_prob
     noisy_prob = torch.clamp(noisy_prob, min=0)  # Ensure non-negative
