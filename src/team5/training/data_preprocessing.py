@@ -18,20 +18,14 @@ def preprocess_data():
     test_prepared_file = os.path.join(Path(data_dir).parent, "prepared", "test.parquet")
 
     if os.path.exists(train_prepared_file) and os.path.exists(test_prepared_file):
-        print(f"Loading prepared data from {train_prepared_file} and {test_prepared_file}")
         df_train_prepared = pl.read_parquet(train_prepared_file)
         df_test_prepared = pl.read_parquet(test_prepared_file)
     else:
         chunk_files = list(data_dir.glob("chunk_*.parquet"))
 
-        print(f"Looking for chunk files in: {data_dir}")
-        print(f"Found {len(chunk_files)} chunk files.")
-
         if not chunk_files:
-            print("No chunk files found. Checking for a single parquet file.")
             single_file = Path(DATASET)
             if single_file.exists():
-                print(f"Found single parquet file: {single_file}")
                 df = pl.read_parquet(single_file)
             else:
                 raise FileNotFoundError(
@@ -40,9 +34,6 @@ def preprocess_data():
         else:
             # Read and concatenate all parquet files
             df = pl.concat([pl.read_parquet(file) for file in chunk_files])
-
-        print("Data loaded. Sample:")
-        print(df.head())
 
         # Sort by scaffold
         df_sorted = sort_dataframe_by_scaffold(df)
@@ -55,11 +46,6 @@ def preprocess_data():
         # Prepare the training and testing data
         df_train_prepared = prepare_data(df_train, filename=train_prepared_file)
         df_test_prepared = prepare_data(df_test, filename=test_prepared_file)
-
-        print("Data prepared. Train columns:")
-        print(df_train_prepared.columns)
-        print("Test columns:")
-        print(df_test_prepared.columns)
     
     # Run tensorization on prepared data
     (
@@ -88,11 +74,6 @@ def preprocess_data():
 
     # Calculate total steps
     total_steps = len(train_dataset) // BATCH_SIZE * NUM_EPOCHS
-
-    print(f"Data preprocessing completed.")
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Test dataset size: {len(test_dataset)}")
-    print(f"Total training steps: {total_steps}")
 
     return train_dataset, test_dataset, total_steps
 

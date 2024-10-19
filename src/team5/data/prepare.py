@@ -160,7 +160,6 @@ def prepare_data(
     padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
-    print(df.columns)
     # Apply transformations
     df_prepared = df.with_columns(
         # Padding mzs and intensities
