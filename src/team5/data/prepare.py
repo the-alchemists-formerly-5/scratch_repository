@@ -137,7 +137,8 @@ def tokenize_smiles(df: pl.DataFrame, tokenizer: AutoTokenizer) -> pl.DataFrame:
 def instrument(instr: str) -> list[int]:
     """Groups instruments into predefined categories."""
     if not instr:
-        return [0, 0, 0, 0, 0]
+        # By default, return QTOF
+        return [0, 1, 0, 0, 0]
 
     if instr.startswith("cfm-predict"):
         return [1, 0, 0, 0, 0]
@@ -150,7 +151,31 @@ def instrument(instr: str) -> list[int]:
     if RE_QQQQ.search(instr):
         return [0, 0, 0, 0, 1]
 
-    return [0, 0, 0, 0, 0]
+    # By default, return QTOF
+    return [0, 1, 0, 0, 0]
+
+
+def get_precursor_charge(adduct: str) -> int:
+    """
+    Determine the precursor charge from the adduct string.
+    
+    Args:
+        adduct (str): The adduct string.
+    
+    Returns:
+        int: The precursor charge. Positive for cations, negative for anions.
+    """
+    if adduct.endswith(']2+') or adduct.endswith(']2-'):
+        return 2 if adduct.endswith('+') else -2
+    elif adduct.endswith(']3+') or adduct.endswith(']3-'):
+        return 3 if adduct.endswith('+') else -3
+    elif adduct.endswith(']+'):
+        return 1
+    elif adduct.endswith(']-'):
+        return -1
+    else:
+        # Default to 1 if charge cannot be determined
+        return 1
 
 
 def prepare_data(
@@ -160,19 +185,50 @@ def prepare_data(
     padding mzs, and processing other columns."""
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
+    has_labels = 'mzs' in df.columns
+
+    label_columns = {}
+    if has_labels:
+        # Padding mzs and intensities
+        label_columns = {
+            "padded_mzs": pl.col("mzs").map_elements(
+                partial(pad, max_items=max_mzs),
+                return_dtype=pl.List(pl.Float64),
+                skip_nulls=False,
+            ),
+            "padded_intensities": pl.col("intensities").map_elements(
+                partial(pad, max_items=max_mzs),
+                return_dtype=pl.List(pl.Float64),
+                skip_nulls=False,
+            ),
+        }
+    
+    # If precursor_mz is not present, add a column with it, and fill with 1000
+    if 'precursor_mz' not in df.columns:
+        df = df.with_columns(precursor_mz=1000.0)
+
+    # If precursor_charge is not present, add a column with it, and deduce it from the adduct
+    if 'precursor_charge' not in df.columns:
+        df = df.with_columns(precursor_charge=pl.col("adduct").map_elements(
+            get_precursor_charge,
+            return_dtype=pl.Int64,
+            skip_nulls=False,
+        ))
+
+    # If in_silico is not present, add a column with it, and fill with 0
+    if 'in_silico' not in df.columns:
+        df = df.with_columns(in_silico=0)
+
+    # If collision_energy is a string, convert it to an integer
+    if 'collision_energy' in df.columns and df['collision_energy'].dtype == pl.Utf8:
+        df = df.with_columns(collision_energy=pl.col("collision_energy").str.extract_all(r"\d+\.?\d*")
+            .list.last()
+            .cast(pl.Float64)
+        )
+
     # Apply transformations
     df_prepared = df.with_columns(
-        # Padding mzs and intensities
-        padded_mzs=pl.col("mzs").map_elements(
-            partial(pad, max_items=max_mzs),
-            return_dtype=pl.List(pl.Float64),
-            skip_nulls=False,
-        ),
-        padded_intensities=pl.col("intensities").map_elements(
-            partial(pad, max_items=max_mzs),
-            return_dtype=pl.List(pl.Float64),
-            skip_nulls=False,
-        ),
+        **label_columns,
         # Enum adduct
         enum_adduct=pl.col("adduct").map_elements(
             partial(vectorize, ADDUCT),
@@ -181,8 +237,6 @@ def prepare_data(
         ),
         # Collision energy extraction (fill missing values here)
         ev=pl.col("collision_energy")
-        .str.extract_all(r"\d+\.?\d*")
-        .list.last()
         .cast(pl.Float64)
         .fill_null(0),
         # Enum in_silico (fill missing values here)
@@ -214,15 +268,14 @@ def prepare_data(
     df_prepared = df_prepared.fill_null(0)
 
     # Select final columns to return
-    df_prepared = df_prepared.select(
-        [
-            "tokenized_smiles",
-            "attention_mask",
-            "padded_mzs",
-            "padded_intensities",
-            "supplementary_data",
-        ]
-    )
+    columns = [
+        "tokenized_smiles",
+        "attention_mask",
+        "supplementary_data",
+    ]
+    if has_labels:
+        columns.extend(["padded_mzs", "padded_intensities"])
+    df_prepared = df_prepared.select(columns)
 
     # If a filename is provided, save the prepared data as a Parquet file
     if filename:
@@ -250,16 +303,21 @@ def tensorize(
     if head > 0:
         df = df.head(head)
 
+    has_labels = 'padded_mzs' in df.columns
+
     # Concatenate mzs and intensities along the last dimension
-    labels = torch.cat(
-        (
-            torch.tensor(df["padded_mzs"].to_list(), dtype=torch.float).unsqueeze(-1),
-            torch.tensor(
-                df["padded_intensities"].to_list(), dtype=torch.float
-            ).unsqueeze(-1),
-        ),
-        dim=-1,
-    )  # Shape: (batch_size, max_fragments, 2)
+    if has_labels:
+        labels = torch.cat(
+            (
+                torch.tensor(df["padded_mzs"].to_list(), dtype=torch.float).unsqueeze(-1),
+                torch.tensor(
+                    df["padded_intensities"].to_list(), dtype=torch.float
+                ).unsqueeze(-1),
+            ),
+            dim=-1,
+        )  # Shape: (batch_size, max_fragments, 2)
+    else:
+        labels = None
 
     # Return the tensors for model consumption
     return (
@@ -352,6 +410,7 @@ def test_tensorize():
         print(f"test_tensorize: FAIL (error occurred: {e})")
 
 
+
 if __name__ == "__main__":
     # Run the tests
     test_prepare_data()
@@ -402,3 +461,4 @@ if __name__ == "__main__":
         train_supplementary_data.shape,
         train_supplementary_data.dtype,
     )
+
