@@ -1,18 +1,6 @@
 import matplotlib.pyplot as plt
 
-
-def load_peft_state_dict(model, state_dict):
-    model_state_dict = model.state_dict()
-    for name, param in state_dict.items():
-        if name in model_state_dict:
-            if param.shape == model_state_dict[name].shape:
-                model_state_dict[name].copy_(param)
-            else:
-                print(f"Skipping parameter {name} due to shape mismatch")
-        else:
-            print(f"Ignoring unexpected key in state_dict: {name}")
-
-    model.load_state_dict(model_state_dict, strict=False)
+from .infer import process_input_data, process_model_output
 
 
 def plot_sample_results(model, input_data, tokenizer, n_samples=5):
