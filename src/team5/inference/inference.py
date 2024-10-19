@@ -6,6 +6,7 @@ import polars as pl
 from transformers import AutoTokenizer
 from transformers import logging as transformers_logging
 
+from src.team5.data.prepare import prepare_data
 from src.team5.training.config import BASE_MODEL
 
 from .checkpoint_loader import CHECKPOINT_DIR, PROJECT_ROOT, TRACKER_FILE
@@ -149,7 +150,6 @@ def main():
         "\nYou can use these columns to compare predicted values with original data (if available) and analyze results based on different input parameters."
     )
 
-    # Plot sample results if requested and data is available
     # Plot sample results if requested and data is available
     if args.plot:
         try:
