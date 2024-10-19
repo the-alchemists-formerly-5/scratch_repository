@@ -136,22 +136,28 @@ def main():
     accelerator.print("Starting training...")
     accelerator.print(f"Output directory: {output_dir}")
     peft_model.train()
+    global_step = 0
+    grad_norm = None
     for epoch in range(NUM_EPOCHS):
         for step, batch in enumerate(train_dataloader):
             loss, outputs = peft_model(**batch)
             loss = loss / gradient_accumulation_steps
             accelerator.backward(loss)
             if step % gradient_accumulation_steps == 0:
+                if accelerator.sync_gradients:
+                    grad_norm = accelerator.clip_grad_norm_(peft_model.parameters(), max_norm=7.0)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+            global_step += 1
             if step % 50 == 0:
                 accelerator.log({
-                    "train_loss": loss.detach().float()
-                }, step=step)
-                accelerator.print(f"step {step}/{num_training_steps}, loss: {loss.detach().float():.6f}")
+                    "train_loss": loss.detach().float(),
+                    "train_grad_norm": grad_norm.detach().float() if grad_norm is not None else None
+                }, step=global_step)
+                accelerator.print(f"step {global_step:07d}/{num_training_steps:07d}, loss: {loss.detach().float():.6f}")
 
-        step_dir = f"step_{step}"
+        step_dir = f"step_{global_step:07d}"
         saving_dir = os.path.join(output_dir, step_dir)
         accelerator.save_state(saving_dir)
 
@@ -167,7 +173,7 @@ def main():
         mean_eval_loss = total_eval_loss / num_eval_steps
         accelerator.log({
             "eval_loss": mean_eval_loss,
-        }, step=step)
+        }, step=global_step)
         accelerator.print(f"\n\nepoch {epoch}, eval loss: {mean_eval_loss:.6f}\n\n")
 
     accelerator.end_training()
