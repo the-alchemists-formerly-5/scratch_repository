@@ -4,7 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 import pytorch_lightning as pl
 import torch_geometric as pyg
-from torch_scatter import scatter_logsumexp
+
 
 from .gnn import GINE, ResBlock, CanonicalOneHot, SignNet
 
@@ -213,7 +213,7 @@ class GrAFF(pl.LightningModule):
         peak_idx = batch.peak_idx + 1
         peak_idx[is_pad] = 0
         num_peaks = batch.intensities.shape[1]
-        log_y_pred = scatter_logsumexp(log_y_pred, peak_idx, 1, dim_size=num_peaks+1)[:,1:]
+        log_y_pred = self.scatter_logsumexp(log_y_pred, peak_idx, 1, dim_size=num_peaks+1)[:,1:]
         
         # predict a height of zero for peaks in intensities that weren't annotated / in vocab
         mask = torch.isinf(log_y_pred)
@@ -225,6 +225,11 @@ class GrAFF(pl.LightningModule):
         
         return loss
     
+    def scatter_logsumexp(src, index, dim, dim_size=None):
+        max_val = torch.zeros(dim_size, device=src.device).scatter(0, index, src, reduce='max')
+        exp_sum = torch.zeros(dim_size, device=src.device).scatter_add(0, index, torch.exp(src - max_val[index]))
+        return max_val + torch.log(exp_sum)
+
     def training_step(self, batch, batch_idx):
         return self.step(batch, 'train')
         
