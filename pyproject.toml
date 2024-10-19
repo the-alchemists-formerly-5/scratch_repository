@@ -11,6 +11,7 @@ readme = "README.md"
 
 [tool.poetry.scripts]
 train = "src.team5.training.finetuning_training:main"
+infer = "src.team5.inference.inference:main"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
@@ -27,6 +28,7 @@ einops = "^0.8.0"
 peft = "^0.13.2"
 evaluate = "^0.4.3"
 accelerate = "^1.0.1"
+argparse = "^1.4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"
