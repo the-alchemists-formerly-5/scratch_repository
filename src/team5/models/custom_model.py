@@ -23,11 +23,11 @@ class FinalLayers(nn.Module):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
-        self.hidden_size = hidden_size
+        self.max_seq_length = max_seq_length
 
         # Process supplementary data
         self.supp_layer = nn.Sequential(
-            nn.Linear(supplementary_data_dim, hidden_size),
+            nn.Linear(supplementary_data_dim, hidden_size),  # Input: [batch_size, supplementary_data_dim], Output: [batch_size, hidden_size]
             nn.LayerNorm(hidden_size),
             nn.ReLU(),
             nn.Dropout(0.1)
@@ -35,62 +35,46 @@ class FinalLayers(nn.Module):
 
         # Main processing layers
         self.main_layers = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size),  # Input: [batch_size, max_seq_length, hidden_size], Output: [batch_size, max_seq_length, hidden_size]
             nn.LayerNorm(hidden_size),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size),  # Input: [batch_size, max_seq_length, hidden_size], Output: [batch_size, max_seq_length, hidden_size]
             nn.LayerNorm(hidden_size),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
 
-        # Sequence to fragment conversion
-        self.seq_to_frag = nn.Linear(max_seq_length, max_fragments)
-
         # Output layers
-        self.mz_output = nn.Linear(hidden_size, 1)
-        self.prob_output = nn.Linear(hidden_size, 1)
-
-        # ClampedReLU for m/z values
-        self.clamped_relu = ClampedReLU(min_value=0, max_value=mz_max_value)
+        self.mz_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),  # Input: [batch_size, hidden_size], Output: [batch_size, max_fragments]
+            ClampedReLU(min_value=0, max_value=mz_max_value)  # Ensure non-negative m/z values up to mz_max_value
+        )
+        self.prob_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),  # Input: [batch_size, hidden_size], Output: [batch_size, max_fragments]
+            nn.Softmax(dim=1)  # Ensure probabilities sum to 1 across fragments
+        )
 
     def forward(self, x, supplementary_data, attention_mask):
+        # x shape: [batch_size, max_seq_length, hidden_size]
+        # supplementary_data shape: [batch_size, supplementary_data_dim]
+        # attention_mask shape: [batch_size, max_seq_length]
+
         # Process supplementary data
-        supp = self.supp_layer(supplementary_data).unsqueeze(1)
+        supp = self.supp_layer(supplementary_data).unsqueeze(1)  # Output shape: [batch_size, 1, hidden_size]
         
         # Combine with input and apply mask
-        x = x * attention_mask.unsqueeze(-1) + supp
+        x = x * attention_mask.unsqueeze(-1) + supp  # Output shape: [batch_size, max_seq_length, hidden_size]
         
         # Main processing
-        x = x + self.main_layers(x)  # Residual connection
-
-        # Rearrange dimensions: (batch_size, max_seq_length, hidden_size) -> (batch_size, hidden_size, max_seq_length)
-        #x = einops.rearrange(x, 'b s h -> b h s')
-        # but I don't want to figure out importing einops
-        x = x.transpose(1, 2)
-
-        # Apply linear layer to convert from max_seq_length to max_fragments
-        x = self.seq_to_frag(x)
-
-        # Rearrange back: (batch_size, hidden_size, max_fragments) -> (batch_size, max_fragments, hidden_size)
-        #x = einops.rearrange(x, 'b h f -> b f h')
-        # but I don't want to figure out importing einops
-        x = x.permute(0, 2, 1)
-
-        # Apply linear layers to get mz and prob for each fragment
-        mzs = self.mz_output(x).squeeze(-1)
-        probs = self.prob_output(x).squeeze(-1)
-
-        # Apply ClampedReLU to m/z values
-        mzs = self.clamped_relu(mzs)
-
-        # Normalize probabilities
-        probs = F.softmax(probs, dim=-1)
-
-        return torch.stack([mzs, probs], dim=-1)
-
-
+        x = x + self.main_layers(x)  # Residual connection, Output shape: [batch_size, max_seq_length, hidden_size]
+        
+        # Output
+        x_mean = x.mean(dim=1)  # Global average pooling, Output shape: [batch_size, hidden_size]
+        mzs = self.mz_output(x_mean)  # Output shape: [batch_size, max_fragments]
+        probs = self.prob_output(x_mean)  # Output shape: [batch_size, max_fragments]
+        
+        return torch.stack([mzs, probs], dim=-1)  # Final output shape: [batch_size, max_fragments, 2]
 
 
 class CustomChemBERTaModel(nn.Module):
