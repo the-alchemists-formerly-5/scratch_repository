@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import torch
 from safetensors.torch import load_file
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 from transformers import logging as transformers_logging
 
+from src.team5.data.prepare import ADDUCT, instrument
 from src.team5.models.custom_model import CustomChemBERTaModel
 from src.team5.training.config import (BASE_MODEL, MAX_FRAGMENTS,
                                        MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM)
@@ -16,7 +18,6 @@ from src.team5.training.lora_config import create_peft_model
 
 # Set the logging level for transformers to ERROR to suppress model loading messages
 transformers_logging.set_verbosity_error()
-
 
 # Get the project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
@@ -59,9 +60,6 @@ def load_model(version=None):
         max_fragments=MAX_FRAGMENTS,
         max_seq_length=MAX_SEQ_LENGTH,
         supplementary_data_dim=SUPPLEMENTARY_DATA_DIM,
-        max_mz=2000,
-        delta_mz=1,
-        intensity_power=0.5,
     )
 
     # Create the PEFT model
@@ -90,9 +88,8 @@ def load_model(version=None):
     return peft_model
 
 
-def preprocess_input(smiles, mzs, intensities, tokenizer):
-    # Tokenize SMILES
-    tokenized_smiles = tokenizer(
+def preprocess_input(smiles, tokenizer, adduct, collision_energy, instrument_type):
+    tokenized = tokenizer(
         smiles,
         padding="max_length",
         truncation=True,
@@ -100,37 +97,75 @@ def preprocess_input(smiles, mzs, intensities, tokenizer):
         return_tensors="pt",
     )
 
-    # Prepare supplementary data (mzs and intensities)
-    supplementary_data = torch.zeros((MAX_FRAGMENTS, 2))
-    for i in range(min(len(mzs), MAX_FRAGMENTS)):
-        supplementary_data[i, 0] = mzs[i]
-        supplementary_data[i, 1] = intensities[i]
+    # Create supplementary data tensor
+    supplementary_data = torch.zeros(SUPPLEMENTARY_DATA_DIM)
+    supplementary_data[0] = ADDUCT.get(adduct, 0)
+    supplementary_data[1] = float(collision_energy)
+    instrument_vec = instrument(instrument_type)
+    supplementary_data[2:7] = torch.tensor(instrument_vec)
 
-    print(f"Initial supplementary_data shape: {supplementary_data.shape}")
+    return tokenized, supplementary_data
 
-    # Reshape supplementary data to match the expected input shape
-    supplementary_data = supplementary_data.view(-1)  # Flatten the tensor
-    print(f"Flattened supplementary_data shape: {supplementary_data.shape}")
 
-    # Adjust the size to match SUPPLEMENTARY_DATA_DIM
-    if supplementary_data.size(0) < SUPPLEMENTARY_DATA_DIM:
-        supplementary_data = torch.nn.functional.pad(
-            supplementary_data, (0, SUPPLEMENTARY_DATA_DIM - supplementary_data.size(0))
+def process_input_data(df, tokenizer):
+    df = df.with_columns(
+        [
+            pl.col("collision_energy").cast(pl.Float64).fill_null(0),
+        ]
+    )
+
+    tokenized_data = {"input_ids": [], "attention_mask": []}
+    supplementary_data = []
+
+    for row in df.iter_rows(named=True):
+        tokenized, suppl_data = preprocess_input(
+            row["smiles"],
+            tokenizer,
+            row["adduct"],
+            row["collision_energy"],
+            row["instrument_type"],
         )
-    elif supplementary_data.size(0) > SUPPLEMENTARY_DATA_DIM:
-        supplementary_data = supplementary_data[:SUPPLEMENTARY_DATA_DIM]
+        tokenized_data["input_ids"].append(tokenized["input_ids"][0])
+        tokenized_data["attention_mask"].append(tokenized["attention_mask"][0])
+        supplementary_data.append(suppl_data)
 
-    print(f"Final supplementary_data shape: {supplementary_data.shape}")
-    print(f"SUPPLEMENTARY_DATA_DIM: {SUPPLEMENTARY_DATA_DIM}")
+    tokenized_data["input_ids"] = torch.stack(tokenized_data["input_ids"])
+    tokenized_data["attention_mask"] = torch.stack(tokenized_data["attention_mask"])
+    supplementary_data = torch.stack(supplementary_data)
 
-    return tokenized_smiles, supplementary_data
+    return tokenized_data, supplementary_data
 
 
-import numpy as np
-import torch
-from transformers import AutoTokenizer
+def process_model_output(output):
+    # Assuming the output is a tensor of shape (batch_size, max_fragments, 2)
+    # where [:, :, 0] represents m/z values and [:, :, 1] represents intensities
+    pred_mzs = output[:, :, 0]
+    pred_intensities = output[:, :, 1]
 
-# ... (previous imports and code)
+    # Ensure non-negative values for m/z and intensities
+    pred_mzs = torch.clamp(pred_mzs, min=0)
+    pred_intensities = torch.clamp(pred_intensities, min=0)
+
+    # Normalize intensities
+    pred_intensities = (
+        pred_intensities / torch.max(pred_intensities, dim=1, keepdim=True).values
+    )
+
+    return pred_mzs, pred_intensities
+
+
+def infer(model, tokenizer, input_data):
+    tokenized_data, supplementary_data = process_input_data(input_data, tokenizer)
+
+    with torch.no_grad():
+        outputs = model(
+            input_ids=tokenized_data["input_ids"],
+            attention_mask=tokenized_data["attention_mask"],
+            supplementary_data=supplementary_data,
+        )
+
+    pred_mzs, pred_intensities = process_model_output(outputs)
+    return pred_mzs, pred_intensities
 
 
 def process_predictions(pred_mzs, pred_intensities, intensity_threshold=0.01, top_k=20):
@@ -156,45 +191,18 @@ def process_predictions(pred_mzs, pred_intensities, intensity_threshold=0.01, to
     return mzs, intensities
 
 
-def infer(model, tokenizer, smiles, mzs, intensities, top_k=20):
-    tokenized_smiles, supplementary_data = preprocess_input(
-        smiles, mzs, intensities, tokenizer
-    )
-
-    print(f"Input shapes:")
-    print(f"  input_ids: {tokenized_smiles['input_ids'].shape}")
-    print(f"  attention_mask: {tokenized_smiles['attention_mask'].shape}")
-    print(f"  supplementary_data: {supplementary_data.shape}")
-
-    with torch.no_grad():
-        outputs = model(
-            input_ids=tokenized_smiles["input_ids"],
-            attention_mask=tokenized_smiles["attention_mask"],
-            supplementary_data=supplementary_data.unsqueeze(0),  # Add batch dimension
-        )
-
-    # Process outputs
-    pred_mzs, pred_intensities = model.base_model.process_predicted_output(outputs)
-    return process_predictions(pred_mzs[0], pred_intensities[0], top_k=top_k)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run inference on the trained model")
     parser.add_argument(
         "--version", type=str, help="Model version to use (default: latest)"
     )
     parser.add_argument(
-        "--smiles", type=str, required=True, help="SMILES string for inference"
+        "--input_file", type=str, required=True, help="Path to input parquet file"
     )
     parser.add_argument(
-        "--mzs", type=float, nargs="+", required=True, help="List of m/z values"
-    )
-    parser.add_argument(
-        "--intensities",
-        type=float,
-        nargs="+",
-        required=True,
-        help="List of intensity values",
+        "--output_file",
+        type=str,
+        help="Path to output file (default: input_file_PREDICTED.parquet)",
     )
     parser.add_argument(
         "--top_k",
@@ -202,29 +210,62 @@ def main():
         default=20,
         help="Number of top peaks to return (default: 20)",
     )
+    parser.add_argument(
+        "--n",
+        type=int,
+        help="Number of elements to process from the input file (default: all)",
+    )
 
     args = parser.parse_args()
 
     print(f"Project root: {PROJECT_ROOT}")
     print(f"Checkpoint directory: {CHECKPOINT_DIR}")
     print(f"Tracker file: {TRACKER_FILE}")
-    print(f"SUPPLEMENTARY_DATA_DIM: {SUPPLEMENTARY_DATA_DIM}")
+
+    # Set default output file name if not provided
+    if args.output_file is None:
+        input_path = Path(args.input_file)
+        args.output_file = str(
+            input_path.with_name(f"{input_path.stem}_PREDICTED{input_path.suffix}")
+        )
 
     # Load the model
     model = load_model(args.version)
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
-    # Run inference
-    pred_mzs, pred_intensities = infer(
-        model, tokenizer, args.smiles, args.mzs, args.intensities, top_k=args.top_k
-    )
+    # Load input data
+    input_data = pl.read_parquet(args.input_file)
 
-    print("\nPredicted Mass Spectrum:")
-    print("------------------------")
-    print("m/z\t\tIntensity")
-    print("------------------------")
-    for mz, intensity in zip(pred_mzs, pred_intensities):
-        print(f"{mz:.4f}\t\t{intensity:.4f}")
+    # Limit the number of rows if n is specified
+    if args.n is not None:
+        input_data = input_data.head(args.n)
+
+    # Run inference
+    pred_mzs, pred_intensities = infer(model, tokenizer, input_data)
+
+    # Process predictions
+    results = []
+    for i in range(len(pred_mzs)):
+        mzs, intensities = process_predictions(
+            pred_mzs[i], pred_intensities[i], top_k=args.top_k
+        )
+        results.append(
+            {
+                "smiles": input_data["smiles"][i],
+                "adduct": input_data["adduct"][i],
+                "collision_energy": input_data["collision_energy"][i],
+                "instrument_type": input_data["instrument_type"][i],
+                "compound_class": input_data["compound_class"][i],
+                "predicted_mzs": mzs.tolist(),
+                "predicted_intensities": intensities.tolist(),
+            }
+        )
+
+    # Save results
+    output_df = pl.DataFrame(results)
+    output_df.write_parquet(args.output_file)
+
+    print(f"Inference completed. Results saved to {args.output_file}")
 
 
 if __name__ == "__main__":

@@ -86,9 +86,7 @@ To use the inference API, follow these steps:
 2. Run the inference script:
 
 ```bash
-python src/team5/inference/inference.py --smiles "C1=CC=CC=C1" \
-    --mzs 100 200 300 \
-    --intensities 0.5 0.7 0.9
+poetry run infer --input_file inference_input_all_columns.parquet --n 10
 ```
 
 Optional arguments:
@@ -124,20 +122,10 @@ poetry install
 4. Run the inference script using Poetry:
 
 ```bash
-poetry run python src/team5/inference/inference.py --smiles "C1=CC=CC=C1" \
-    --mzs 100 200 300 \
-    --intensities 0.5 0.7 0.9
+poetry run infer --input_file inference_input_all_columns.parquet --n 10
 ```
 
 Optional arguments remain the same as mentioned in the [Using the Inference API](#using-the-inference-api) section.
-
-There's a convenience script defined already and you can run inference simply by:
-
-```bash
-poetry run infer --smiles "C1=CC=CC=C1" \
-    --mzs 100 200 300 \
-    --intensities 0.5 0.7 0.9
-```
 
 6. If you're using the inference function in a Python script within the Poetry environment, you can activate the environment and run your script:
 
