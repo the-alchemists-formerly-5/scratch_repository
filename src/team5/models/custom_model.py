@@ -216,37 +216,28 @@ class CustomChemBERTaModel(nn.Module):
     
     def evaluate_spectra(self, predicted_output, labels):
         """
-        Evaluate spectra using greedy cosine and hungarian cosine metrics, processing both 
+        Evaluate spectra using greedy cosine metric, processing both 
         the predicted output and the labels to extract m/z values and intensities.
         
         Parameters:
-        - predicted_output: Tuple (pred_mz, pred_probs, pred_flags)
-        - labels: Ground truth labels Tuple(m/z, intensities)
+        - predicted_output: Tensor of shape [batch_size, max_fragments, 2] (m/z, probabilities)
+        - labels: Ground truth labels Tensor of shape [batch_size, max_fragments, 2] (m/z, probabilities)
         
         Returns:
         - A dictionary with the greedy cosine score.
         """
-
         # Step 1: Process the predicted output
-        #pred_mz, pred_probs, pred_flags = self.extract_from_predicted_output(predicted_output)
         pred_mz, pred_probs = self.extract_from_predicted_output(predicted_output)
-        # Apply the threshold: if flag > 0.5, keep values, else zero them out
-        #mask = (pred_flags > 0.5).float()
-
-        # Set values to zero where the flag is below the threshold
-        #pred_mz = pred_mz * mask
-        #pred_probs = pred_probs * mask
 
         # Step 2: Extract the ground truth m/z and intensities from labels
         mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
 
-        # Step 3: Calculate the metrics using the processed predicted and ground truth values, for each sample in the batch, then average
+        # Step 3: Calculate the metrics for each sample in the batch, then average
         greedy_scores = []
         for i in range(pred_mz.shape[0]):
             greedy_score = greedy_cosine(pred_mz[i], mz_true[i], pred_probs[i], probabilities_true[i])
             greedy_scores.append(greedy_score)
         greedy_score = sum(greedy_scores) / len(greedy_scores)
-        #hungarian_score = hungarian_cosine(pred_mz, mz_true, pred_intensities, intensities_true)
 
         return {
             'greedy_score': greedy_score,
@@ -349,88 +340,62 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
 #         if param.requires_grad:
 #             print(f"{name} has shape {param.shape}")
     
-if __name__ == "__main__":
-    print("Testing")
+def test_model():
+    # Set up constants
+    batch_size = 8
+    max_fragments = 4
+    max_seq_length = 10
+    supplementary_data_dim = 81
 
     # Load the real ChemBERTa model and tokenizer
     chemBERTa_model = AutoModelForMaskedLM.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
     tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
-    
-    BASE_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
-    MAX_FRAGMENTS = 4 # from anton, max number of mzs/intensities
-    MAX_SEQ_LENGTH = 10 # base model max seq length
-    SUPPLEMENTARY_DATA_DIM = 81
-    batch_size = 8  # Ensure this is set to 8
 
-    # Initialize the CustomChemBERTaModel (untrained)
-    custom_model = CustomChemBERTaModel(chemBERTa_model, MAX_FRAGMENTS, MAX_SEQ_LENGTH, SUPPLEMENTARY_DATA_DIM)
+    # Initialize the CustomChemBERTaModel
+    custom_model = CustomChemBERTaModel(chemBERTa_model, max_fragments, max_seq_length, supplementary_data_dim)
 
     # Create dummy input data
     input_smiles = ["CCONaCO", "CCC", "CCN", "CCCl", "CCBr", "CCCC", "CCCCO", "CCNCl"]
     input_encodings = tokenizer(
         input_smiles, 
-        padding='max_length',  # Ensure padding to max_seq_length
+        padding='max_length',
         truncation=True, 
         return_tensors="pt", 
-        max_length=MAX_SEQ_LENGTH  # Explicitly define max sequence length
+        max_length=max_seq_length
     )
-    #print(f"input_encodings: {input_encodings}")
-    print(f" shape of input_encodings: {input_encodings['input_ids'].shape}")
 
-    input_ids = input_encodings["input_ids"]  # Token IDs
-    attention_mask = input_encodings["attention_mask"]  # Attention mask
-    supplementary_data = torch.randn(batch_size, SUPPLEMENTARY_DATA_DIM)  # Random supplementary data
-    labels = torch.randn(batch_size, MAX_FRAGMENTS, 2)  # Random actual m/z and intensities for testing
-    with torch.no_grad():
-        loss, predicted_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
-        print(f"predicted_output shape: {predicted_output.shape}")
+    input_ids = input_encodings["input_ids"]
+    attention_mask = input_encodings["attention_mask"]
+    supplementary_data = torch.randn(batch_size, supplementary_data_dim)
 
-   # Create labels tensor
-    mz_values = torch.randint(100, 401, (batch_size, MAX_FRAGMENTS))
-    intensities = torch.rand((batch_size, MAX_FRAGMENTS))
-    probabilities = intensities / intensities.sum(dim=1, keepdim=True)  # Normalize to sum to 1 for each batch
+    # Generate random "labels" data
+    mz_values = torch.randint(100, 401, (batch_size, max_fragments)).float()
+    intensities = torch.rand((batch_size, max_fragments))
+    probabilities = intensities / intensities.sum(dim=1, keepdim=True)
     labels = torch.stack([mz_values, probabilities], dim=-1)
 
-    print(f"labels shape: {labels.shape}")
-
-    # Create pred_output tensor
-    pred_mzs = mz_values
-    pred_probabilities = probabilities
-    pred_flags = torch.ones((batch_size, MAX_FRAGMENTS))  # All values set to 1
-    pred_output = torch.stack([pred_mzs, pred_probabilities, pred_flags], dim=-1)
-
-    print(f"pred_output shape: {pred_output.shape}")
+    # Add noise to create "predicted" data
+    sigma_mz = 1.0
+    sigma_prob = 0.1
+    noisy_mz = mz_values + torch.randn_like(mz_values) * sigma_mz
+    noisy_prob = probabilities + torch.randn_like(probabilities) * sigma_prob
+    noisy_prob = torch.clamp(noisy_prob, min=0)  # Ensure non-negative
+    noisy_prob = noisy_prob / noisy_prob.sum(dim=1, keepdim=True)  # Renormalize
+    predicted_output = torch.stack([noisy_mz, noisy_prob], dim=-1)
 
     # Calculate loss
-    sigma = 0.00001
-    loss = custom_model.calculate_loss(pred_output, labels, sigma=sigma)
+    loss = custom_model.calculate_loss(predicted_output, labels, sigma=sigma_mz)
     print(f"Loss value: {loss.item()}")
 
     # Evaluate spectra
-    evaluation_score = custom_model.evaluate_spectra(pred_output, labels)
+    evaluation_score = custom_model.evaluate_spectra(predicted_output, labels)
     print(f"Evaluation score: {evaluation_score}")
 
+    # Test the forward pass
+    with torch.no_grad():
+        model_loss, model_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
+        print(f"Model forward pass loss: {model_loss.item()}")
+        print(f"Model output shape: {model_output.shape}")
 
-    # # Test the loss calculation
-    # print(f"Loss value: {loss.item()}")
-
-    # # Verify the shape of the predicted output
-    # assert pred_output.shape == (batch_size, max_fragments, 3), f"Expected shape {(batch_size, max_fragments, 3)}, but got {pred_output.shape}"
-    # print(f"Output shape is correct: {pred_output.shape}")
-
-    # # Now test the evaluate_spectra function with dummy data
-    # predicted_mzs = pred_output[:, :, 0]  # Extract predicted m/z values
-    # predicted_probs = pred_output[:, :, 1]  # Extract predicted probabilities (intensities)
-    # predicted_flags = pred_output[:, :, 2]  # Extract predicted flags
-    
-    # # Extract ground truth m/z and intensities for evaluation
-    # actual_mzs = labels[:, :, 0]
-    # actual_intensities = labels[:, :, 1]
-
-    # # Package predicted outputs and labels for the evaluate_spectra function
-    # predicted_output = (predicted_mzs, predicted_probs, predicted_flags)
-    # labels_for_eval = (actual_mzs, actual_intensities)
-
-    # # Perform spectra evaluation
-    # evaluation_results = MS_model.evaluate_spectra(predicted_output, labels_for_eval)
-    # print(f"Greedy cosine score: {evaluation_results['greedy_cosine']}")
+if __name__ == "__main__":
+    test_model()
