@@ -74,7 +74,7 @@ class FinalLayers(nn.Module):
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 max_mz=2000, delta_mz=0.1, intensity_power=0.5):
+                 max_mz=2000, delta_mz=1, intensity_power=0.5):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
