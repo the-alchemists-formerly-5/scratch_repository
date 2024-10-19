@@ -10,76 +10,125 @@ import numpy as np
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
 class ClampedReLU(nn.Module):
-    def __init__(self, min_value, max_value):
+    def __init__(self, max_value):
         super().__init__()
-        self.min_value = min_value
         self.max_value = max_value
-    
+
     def forward(self, x):
-        return torch.clamp(F.relu(x), min=self.min_value, max=self.max_value)
+        return torch.clamp(F.relu(x), max=self.max_value)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, supplementary_data_dim, max_fragments, max_seq_length, mz_max_value=2000):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments, num_heads, mz_max_value=2000, prob_threshold=1e-4):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
-        self.max_seq_length = max_seq_length
+        self.hidden_size = hidden_size
+        self.prob_threshold = prob_threshold
 
-        # Process supplementary data
-        self.supp_layer = nn.Sequential(
-            nn.Linear(supplementary_data_dim, hidden_size),  # Input: [batch_size, supplementary_data_dim], Output: [batch_size, hidden_size]
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
+        # Linear layer to process supplementary data
+        self.supplementary_linear = nn.Linear(supplementary_data_dim, hidden_size)
+        self.supplementary_activation = nn.GELU()
+        self.supplementary_dropout = nn.Dropout(0.1)
+        self.supplementary_norm = nn.LayerNorm(hidden_size)
 
-        # Main processing layers
-        self.main_layers = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),  # Input: [batch_size, max_seq_length, hidden_size], Output: [batch_size, max_seq_length, hidden_size]
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_size, hidden_size),  # Input: [batch_size, max_seq_length, hidden_size], Output: [batch_size, max_seq_length, hidden_size]
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
+        # Multihead cross-attention layer
+        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
+        self.cross_attention_norm = nn.LayerNorm(hidden_size)
+        self.cross_attention_dropout = nn.Dropout(0.1)
+        self.cross_attention_activation = nn.GELU()
+        self.cross_attention_final_norm = nn.LayerNorm(hidden_size)
 
-        # Output layers
-        self.mz_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),  # Input: [batch_size, hidden_size], Output: [batch_size, max_fragments]
-            ClampedReLU(min_value=0, max_value=mz_max_value)  # Ensure non-negative m/z values up to mz_max_value
-        )
-        self.prob_output = nn.Sequential(
-            nn.Linear(hidden_size, max_fragments),  # Input: [batch_size, hidden_size], Output: [batch_size, max_fragments]
-            nn.Softmax(dim=1)  # Ensure probabilities sum to 1 across fragments
-        )
+        # MLP after cross-attention
+        self.cross_attention_mlp_fc1 = nn.Linear(hidden_size, 4 * hidden_size)
+        self.cross_attention_mlp_fc2 = nn.Linear(4 * hidden_size, hidden_size)
+
+        # Compress the hidden size to 50
+        self.compress_hidden_size = nn.Linear(hidden_size, 64)
+
+        # Output linear layers
+        self.output_linear_mz = nn.Linear(4096, self.max_fragments)
+        self.output_linear_prob = nn.Linear(4096, self.max_fragments)
+        
+        # Activation for m/z values
+        self.mz_activation = ClampedReLU(max_value=mz_max_value)
 
     def forward(self, x, supplementary_data, attention_mask):
-        # x shape: [batch_size, max_seq_length, hidden_size]
-        # supplementary_data shape: [batch_size, supplementary_data_dim]
-        # attention_mask shape: [batch_size, max_seq_length]
+        # x: (batch_size, seq_length, hidden_size)
+        # supplementary_data: (batch_size, supplementary_data_dim)
+        # attention_mask: (batch_size, seq_length)
 
-        # Process supplementary data
-        supp = self.supp_layer(supplementary_data).unsqueeze(1)  # Output shape: [batch_size, 1, hidden_size]
+        # Apply the attention mask to zero out padding tokens in x
+        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
+        x = x * expanded_mask  # Shape: (batch_size, seq_length, hidden_size)
+
+        # Process supplementary data to match hidden_size
+        supplementary_data = self.supplementary_linear(supplementary_data)  # Shape: (batch_size, hidden_size)
+        supplementary_data = self.supplementary_dropout(supplementary_data)
+        supplementary_data = self.supplementary_norm(supplementary_data)
+        supplementary_data = self.supplementary_activation(supplementary_data)
+
+        # Expand supplementary_data to match x's shape and add to x
+        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
+        x = x + supplementary_data_expanded  # Shape: (batch_size, seq_length, hidden_size)
+
+        # Initialize y with zeros
+        batch_size = x.size(0)
+        y = torch.zeros(batch_size, 64, self.hidden_size, device=x.device)  # Shape: (batch_size, 64, hidden_size)
+    
+        # Create key_padding_mask for x (True where padding)
+        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
+
+        # Multihead cross-attention: query from y, key and value from x
+        delta_y, _ = self.cross_attention(query=y, key=x, value=x, key_padding_mask=key_padding_mask)
+        # delta_y shape: (batch_size, 64, hidden_size)
         
-        # Combine with input and apply mask
-        x = x * attention_mask.unsqueeze(-1) + supp  # Output shape: [batch_size, max_seq_length, hidden_size]
-        
-        # Main processing
-        x = x + self.main_layers(x)  # Residual connection, Output shape: [batch_size, max_seq_length, hidden_size]
-        
-        # Output
-        x_mean = x.mean(dim=1)  # Global average pooling, Output shape: [batch_size, hidden_size]
-        mzs = self.mz_output(x_mean)  # Output shape: [batch_size, max_fragments]
-        probs = self.prob_output(x_mean)  # Output shape: [batch_size, max_fragments]
-        
-        return torch.stack([mzs, probs], dim=-1)  # Final output shape: [batch_size, max_fragments, 2]
+        # Apply residual connection and normalization for cross-attention
+        y = self.cross_attention_norm(y + delta_y)  # Shape: (batch_size, 64, hidden_size)
+
+        # MLP after cross-attention
+        delta_y = self.cross_attention_mlp_fc1(y)
+        delta_y = self.cross_attention_activation(delta_y)
+        delta_y = self.cross_attention_dropout(delta_y)
+        delta_y = self.cross_attention_mlp_fc2(delta_y)
+        y = self.cross_attention_final_norm(y + delta_y)  # Shape: (batch_size, 64, hidden_size)
+
+        # Compress the hidden size to 64
+        y = self.compress_hidden_size(y)
+
+        # Stack y to have shape (batch_size, 64, 64) -> (batch_size, 4096)
+        y = y.view(batch_size, -1)
+
+        # Project y to get m/z values and probabilities
+        mzs = self.output_linear_mz(y) # Shape: (batch_size, 512)
+        probs = self.output_linear_prob(y)  # Shape: (batch_size, 512)
+
+
+        # Apply activations
+        mzs = self.mz_activation(mzs)  # Shape: (batch_size, max_fragments)
+        probs = F.softmax(probs, dim=1)  # Shape: (batch_size, max_fragments)
+
+        # Create a mask for probabilities above the threshold
+        mask = probs > self.prob_threshold
+
+        # Apply the mask to probabilities
+        probs = probs * mask.float()
+
+        # Renormalize the probabilities
+        probs = probs / (probs.sum(dim=1, keepdim=True) + 1e-10)
+
+        # Apply the mask to m/z values
+        mzs = mzs * mask.float()
+
+        # Stack together mzs and probs
+        output = torch.stack([mzs, probs], dim=-1)  # Shape: (batch_size, max_fragments, 2)
+
+        return output
 
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 initial_sigma=1.0, final_sigma=1.0, eval_sigma=1.0, total_steps=1000000):
+                 initial_sigma=1.0, final_sigma=1.0, eval_sigma=1.0, total_steps=1000000, 
+                 prob_threshold=1e-4, mz_max_value=2000, num_heads=8):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
@@ -87,12 +136,18 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.mz_max_value = 2000
-        self.final_layers = FinalLayers(hidden_size=self.hidden_size, 
-                           supplementary_data_dim=self.dim_supplementary_data, 
-                           max_fragments=self.max_fragments, 
-                           max_seq_length=self.max_seq_length, 
-                           mz_max_value=self.mz_max_value)
+        self.mz_max_value = mz_max_value
+        self.prob_threshold = prob_threshold
+        self.num_heads = num_heads
+        self.final_layers = FinalLayers(
+            hidden_size=self.hidden_size, 
+            supplementary_data_dim=self.dim_supplementary_data, 
+            max_fragments=self.max_fragments, 
+            num_heads=self.num_heads,
+            mz_max_value=self.mz_max_value,
+            prob_threshold=self.prob_threshold
+        )
+        
         
         # Sigma scheduling parameters
         self.initial_sigma = initial_sigma
@@ -125,25 +180,22 @@ class CustomChemBERTaModel(nn.Module):
         else:
             return predicted_output
         
-    def extract_from_predicted_output(self, predicted_output):
-        pred_mzs = predicted_output[:, :, 0]    # Predicted m/z values
-        pred_probabilities = predicted_output[:, :, 1]  # Predicted probabilities
-        #pred_flags = predicted_output[:, :, 2]  # Predicted flags (already used in mzs and probs calculations)
-        #return pred_mzs, pred_probabilities, pred_flags
-        return pred_mzs, pred_probabilities
-    
-    def extract_from_actual_labels(self, actual_labels):
-        actual_mzs = actual_labels[:, :, 0]  # Shape: (batch_size, max_fragments)
-        actual_intensities = actual_labels[:, :, 1]  # Shape: (batch_size, max_fragments)
-        actual_probabilities = actual_intensities / (torch.sum(actual_intensities, dim=1, keepdim=True) + 1e-8)
-        return actual_mzs, actual_intensities, actual_probabilities
+    def extract_data(self, tensor):
+        """
+        Extract m/z values and probabilities/intensities from a tensor.
+        
+        :param tensor: Tensor of shape [batch_size, max_fragments, 2]
+        :return: Tuple of (m/z values, probabilities/intensities)
+        """
+        return tensor[:, :, 0], tensor[:, :, 1]
 
     def calculate_loss(self, predictions, actual_labels, sigma):
+        pred_mzs, pred_probabilities = self.extract_data(predictions)
+        actual_mzs, actual_intensities = self.extract_data(actual_labels)
+        actual_probabilities = actual_intensities / (torch.sum(actual_intensities, dim=1, keepdim=True) + 1e-8)
 
-        #pred_mzs, pred_probabilities, pred_flags = self.extract_from_predicted_output(predictions)
-        pred_mzs, pred_probabilities= self.extract_from_predicted_output(predictions)
-        actual_mzs, actual_intensities, actual_probabilities = self.extract_from_actual_labels(actual_labels)
         return torch.abs(self.gaussian_kl_loss(pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma=sigma))
+
 
     def gaussian_kl_loss(self, predicted_mzs, predicted_probabilities, actual_mzs, actual_probabilities, sigma):
         """
@@ -189,35 +241,6 @@ class CustomChemBERTaModel(nn.Module):
         # Sum over peaks and average over batch
         return kl_div.sum(dim=1).mean()
     
-    def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
-
-        print(f"pred_probabilities:\n {pred_probabilities}")
-        print(f"actual_probabilities:\n {actual_probabilities}")
-
-        def gaussian_prediction(x, centers, heights, sigma):
-            x = x.unsqueeze(2)
-            centers = centers.unsqueeze(1)
-            heights = heights.unsqueeze(1)
-            
-            gauss = torch.exp(-((x - centers) ** 2) / (2 * sigma ** 2))
-            
-            result = torch.sum(heights * gauss, dim=2)
-            print(f"result: \n {result}")
-            return result
-
-        # Compute gaussian predictions for actual mzs
-        gaussian_pred_probabilities = gaussian_prediction(actual_mzs, pred_mzs, pred_probabilities, sigma)
-
-        # Clamp values to avoid zeros
-        gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
-
-        # Compute cosine similarity
-        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities, dim=1)
-
-        # Convert similarity to loss (1 - similarity)
-        loss = 1 - similarity
-
-        return loss.mean()
 
     def train(self, mode=True):
         super(CustomChemBERTaModel, self).train(mode)
@@ -232,131 +255,59 @@ class CustomChemBERTaModel(nn.Module):
     
     def evaluate_spectra(self, predicted_output, labels):
         """
-        Evaluate spectra using greedy cosine metric, processing both 
-        the predicted output and the labels to extract m/z values and intensities.
+        Evaluate spectra using greedy cosine metric.
         
-        Parameters:
-        - predicted_output: Tensor of shape [batch_size, max_fragments, 2] (m/z, probabilities)
-        - labels: Ground truth labels Tensor of shape [batch_size, max_fragments, 2] (m/z, probabilities)
-        
-        Returns:
-        - A dictionary with the greedy cosine score.
+        :param predicted_output: Tensor of shape [batch_size, max_fragments, 2] (m/z, probabilities)
+        :param labels: Ground truth labels Tensor of shape [batch_size, max_fragments, 2] (m/z, intensities)
+        :return: A dictionary with the greedy cosine score.
         """
-        # Step 1: Process the predicted output
-        pred_mz, pred_probs = self.extract_from_predicted_output(predicted_output)
+        pred_mz, pred_probs = self.extract_data(predicted_output)
+        true_mz, true_intensities = self.extract_data(labels)
+        
+        greedy_scores = self.batch_greedy_cosine(pred_mz, true_mz, pred_probs, true_intensities)
+        return {'greedy_score': greedy_scores.mean().item()}
 
-        # Step 2: Extract the ground truth m/z and intensities from labels
-        mz_true, intensities_true, probabilities_true = self.extract_from_actual_labels(labels)
+    @staticmethod
+    def batch_greedy_cosine(mz_a, mz_b, intensities_a, intensities_b, tolerance=0.1):
+        """
+        Compute greedy cosine similarity for a batch of spectra.
+        
+        :param mz_a: Tensor of shape [batch_size, max_fragments] - m/z values for spectra A
+        :param mz_b: Tensor of shape [batch_size, max_fragments] - m/z values for spectra B
+        :param intensities_a: Tensor of shape [batch_size, max_fragments] - intensities for spectra A
+        :param intensities_b: Tensor of shape [batch_size, max_fragments] - intensities for spectra B
+        :param tolerance: Float - tolerance for m/z matching
+        :return: Tensor of shape [batch_size] - greedy cosine similarity scores
+        """
+        def create_spectrum(mz, intensities):
+            # Convert to numpy and sort
+            mz, intensities = map(lambda x: x.detach().cpu().numpy(), (mz, intensities))
+            sorted_indices = np.argsort(mz)
+            return Spectrum(mz=mz[sorted_indices], intensities=intensities[sorted_indices])
 
-        # Step 3: Calculate the metrics for each sample in the batch, then average
-        greedy_scores = []
-        for i in range(pred_mz.shape[0]):
-            greedy_score = greedy_cosine(pred_mz[i], mz_true[i], pred_probs[i], probabilities_true[i])
-            greedy_scores.append(greedy_score)
-        greedy_score = sum(greedy_scores) / len(greedy_scores)
+        cosine_greedy = CosineGreedy(tolerance=tolerance)
+        
+        scores = []
+        for i in range(mz_a.shape[0]):
+            spectrum_a = create_spectrum(mz_a[i], intensities_a[i])
+            spectrum_b = create_spectrum(mz_b[i], intensities_b[i])
+            
+            try:
+                result = cosine_greedy.pair(spectrum_a, spectrum_b)
+                score, _ = result.tolist()
+            except ZeroDivisionError:
+                score = 1.0
+            scores.append(score)
 
-        return {
-            'greedy_score': greedy_score,
-        }
-
-
-def process_predicted_output(predicted_output):
-    """
-    Processes the predicted output to extract m/z values and intensities.
-    
-    Parameters:
-    - predicted_output: Tuple containing predicted m/z, predicted probabilities (for intensities), and flags
-    - threshold: A cutoff value for the flags. If flag > threshold, the corresponding m/z and intensity are set to zero.
-    
-    Returns:
-    - pred_mz: Processed predicted m/z values
-    - pred_intensities: Normalized predicted intensities
-    """
-    #pred_mz, pred_probs, pred_flags = predicted_output
-    pred_mz, pred_probs = predicted_output
-    # Apply the threshold: if flag > 0.5, keep values, else zero them out
-    #mask = (pred_flags > 0.5).float()
-
-    # Set values to zero where the flag is below the threshold
-    #pred_mz = pred_mz * mask
-    #pred_probs = pred_probs * mask
-
-    # Renormalize the predicted intensities (pred_probs) so the maximum is 1
-    max_intensity = torch.max(pred_probs, dim=1, keepdim=True).values
-    pred_intensities = torch.where(max_intensity > 0, pred_probs / max_intensity, torch.zeros_like(pred_probs))
-    
-    return pred_mz, pred_intensities
-
-
-def create_spectrum(mz, intensities):
-    """
-    Create a Spectrum object from m/z values and intensities for use in matchms.
-    
-    Parameters:
-    - mz: m/z values
-    - intensities: Intensity values
-    
-    Returns:
-    - spectrum: A matchms Spectrum object
-    """
-    metadata = {}
-    mz = mz.detach().numpy()
-    intensities = intensities.detach().numpy()
-    # sort the mz and intensities, according to mz
-    sorted_indices = np.argsort(mz)
-    mz = mz[sorted_indices]
-    intensities = intensities[sorted_indices]
-    return Spectrum(mz=mz, intensities=intensities, metadata=metadata)
-
-def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
-    """
-    Use CosineGreedy from matchms to calculate greedy cosine similarity between two spectra.
-    
-    Parameters:
-    - mz_a: m/z values for spectrum A
-    - mz_b: m/z values for spectrum B
-    - intensities_a: Intensity values for spectrum A
-    - intensities_b: Intensity values for spectrum B
-    
-    Returns:
-    - similarity: CosineGreedy similarity score
-    """
-    
-    # Create Spectrum objects
-    spectrum_a = create_spectrum(mz_a, intensities_a)
-    spectrum_b = create_spectrum(mz_b, intensities_b)
-
-    # Instantiate the CosineGreedy similarity function
-    cosine_greedy = CosineGreedy(tolerance=0.1)  # Adjust tolerance as needed
-
-    # Compute the similarity score
-    try:
-        result = cosine_greedy.pair(spectrum_a, spectrum_b)
-        score, _ = result.tolist()
-    except ZeroDivisionError as e:
-        score = 1.
-    return score
+        return torch.tensor(scores, device=mz_a.device)
 
 
 
 # ----- Testing -----
 
-
-# if __name__ == "__main__":
-    
-
-#     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
-    
-#     # Add the supplementary_data_dim parameter
-#     MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=81)  # Adjust the value of supplementary_data_dim as needed
-
-#     print(MS_model)
-
-#     for name, param in MS_model.named_parameters():
-#         if param.requires_grad:
-#             print(f"{name} has shape {param.shape}")
     
 def test_model():
+    print("Testing model")
     # Set up constants
     batch_size = 8
     max_fragments = 4
@@ -411,7 +362,26 @@ def test_model():
     with torch.no_grad():
         model_loss, model_output = custom_model(input_ids, attention_mask, supplementary_data, labels=labels)
         print(f"Model forward pass loss: {model_loss.item()}")
-        print(f"Model output shape: {model_output.shape}")
+        print(f"Model output probs: {model_output[:, :, 1]}")
+    
+    peft_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["query", "value"],
+        modules_to_save=["final_layers"], # change this to the name of the new modules at the end.
+        bias="none"
+    )
+
+    peft_model = get_peft_model(custom_model, peft_config)
+
+
+    model = get_peft_model(custom_model, peft_config)
+    model.print_trainable_parameters()
 
 if __name__ == "__main__":
+
+    from peft import LoraConfig, get_peft_model
     test_model()
+
+    
