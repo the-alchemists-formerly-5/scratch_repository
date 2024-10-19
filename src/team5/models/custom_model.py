@@ -11,89 +11,63 @@ import numpy as np
 logging.getLogger("matchms").setLevel(logging.ERROR)
 
 class FinalLayers(nn.Module):
-    def __init__(self, hidden_size, max_seq_length, supplementary_data_dim, max_fragments, num_heads):
+    def __init__(self, hidden_size, supplementary_data_dim, max_fragments):
         super(FinalLayers, self).__init__()
 
         self.max_fragments = max_fragments
 
-        # Linear layer to process supplementary data
-        self.layer1 = nn.Linear(supplementary_data_dim, hidden_size)
-        self.activation1 = nn.GELU()
-        self.dropout1 = nn.Dropout(0.1)
-        self.layernorm1 = nn.LayerNorm(hidden_size)
+        # Process supplementary data
+        self.supp_layer = nn.Sequential(
+            nn.Linear(supplementary_data_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # Multihead self-attention layer
-        self.self_attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True, dropout=0.1)
-        self.layernorm3 = nn.LayerNorm(hidden_size)
-        self.dropout_self = nn.Dropout(0.1)
-        self.activation_self = nn.GELU()
-        self.layernorm_self = nn.LayerNorm(hidden_size)
+        # Main processing layers
+        self.main_layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
 
-        # MLP after self-attention
-        self.mlp_fc1_self = nn.Linear(hidden_size, 4 * hidden_size)
-        self.mlp_fc2_self = nn.Linear(4 * hidden_size, hidden_size)
-
-        # Output linear layer to project to (b, max_fragments, 2)
-        self.output_linear = nn.Linear(hidden_size, 2 * max_fragments)
-        self.dropout_output = nn.Dropout(0.1)
-        self.activation_output = nn.GELU()
+        # Output layers
+        self.mz_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.ReLU()  # Ensure non-negative m/z values
+        )
+        self.prob_output = nn.Sequential(
+            nn.Linear(hidden_size, max_fragments),
+            nn.Sigmoid()  # Ensure probabilities are between 0 and 1
+        )
 
     def forward(self, x, supplementary_data, attention_mask):
-        # x: (batch_size, seq_length, hidden_size)
-        # supplementary_data: (batch_size, supplementary_data_dim)
-        # attention_mask: (batch_size, seq_length)
-
-        # Apply the attention mask to zero out padding tokens in x
-        expanded_mask = attention_mask.unsqueeze(-1)  # Shape: (batch_size, seq_length, 1)
-        x = x * expanded_mask  # Zero out padding tokens
-
-        # Process supplementary data to match hidden_size
-        supplementary_data = self.layer1(supplementary_data)  # Shape: (batch_size, hidden_size)
-        supplementary_data = self.dropout1(supplementary_data)
-        supplementary_data = self.layernorm1(supplementary_data)
-        supplementary_data = self.activation1(supplementary_data)
-
-        # Expand supplementary_data to match x's shape and add to x
-        supplementary_data_expanded = supplementary_data.unsqueeze(1).expand(-1, x.size(1), -1)  # Shape: (batch_size, seq_length, hidden_size)
-        x = x + supplementary_data_expanded
-
-        # Create key_padding_mask for x (True where padding)
-        key_padding_mask = attention_mask == 0  # Shape: (batch_size, seq_length)
-
-        # Multihead self-attention on x
-        delta_x, _ = self.self_attention(query=x, key=x, value=x, key_padding_mask=key_padding_mask)
-        x = self.layernorm3(x + delta_x)
-
-        # MLP after self-attention
-        delta_x = self.mlp_fc1_self(x)
-        delta_x = self.activation_self(delta_x)
-        delta_x = self.dropout_self(delta_x)
-        delta_x = self.mlp_fc2_self(delta_x)
-        x = self.layernorm_self(x + delta_x)
-
-        # Project x to (batch_size, seq_length, 2 * max_fragments)
-        x = self.output_linear(x)
-        x = self.dropout_output(x)
-        x = self.activation_output(x)
-
-        # Split x into mzs, probs
-        mzs = x[:, :, 0]    # Shape: (batch_size, max_fragments)
-        probs = x[:, :, 1]  # Shape: (batch_size, max_fragments)
-
-        # Softmax on probs
-        probs = F.softmax(probs, dim=1)
-
-        # Stack together mzs, probs
-        output = torch.stack([mzs, probs], dim=-1)
-
-        return output
+        # Process supplementary data
+        supp = self.supp_layer(supplementary_data).unsqueeze(1)
+        
+        # Combine with input and apply mask
+        x = x * attention_mask.unsqueeze(-1) + supp
+        
+        # Main processing
+        x = x + self.main_layers(x)  # Residual connection
+        
+        # Output
+        mzs = self.mz_output(x.mean(dim=1))  # Global average pooling
+        probs = self.prob_output(x.mean(dim=1))
+        
+        return torch.stack([mzs, probs], dim=-1)
 
 
 
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 initial_sigma=2.0, final_sigma=0.0001, eval_sigma=0.1, total_steps=1000000):
+                 initial_sigma=1.0, final_sigma=1.0, eval_sigma=1.0, total_steps=1000000):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments
@@ -101,8 +75,8 @@ class CustomChemBERTaModel(nn.Module):
         self.steps = 0
         self.hidden_size = self.model.config.hidden_size
         self.dim_supplementary_data = supplementary_data_dim
-        self.final_layers = FinalLayers(self.hidden_size, self.max_seq_length, 
-                                        self.dim_supplementary_data, self.max_fragments, num_heads=8)
+        self.final_layers = FinalLayers(self.hidden_size, 
+                                        self.dim_supplementary_data, self.max_fragments)
         
         # Sigma scheduling parameters
         self.initial_sigma = initial_sigma
@@ -199,6 +173,35 @@ class CustomChemBERTaModel(nn.Module):
         # Sum over peaks and average over batch
         return kl_div.sum(dim=1).mean()
     
+    def gaussian_cosine_loss(self, pred_mzs, pred_probabilities, actual_mzs, actual_probabilities, sigma, epsilon=1e-10):
+
+        print(f"pred_probabilities:\n {pred_probabilities}")
+        print(f"actual_probabilities:\n {actual_probabilities}")
+
+        def gaussian_prediction(x, centers, heights, sigma):
+            x = x.unsqueeze(2)
+            centers = centers.unsqueeze(1)
+            heights = heights.unsqueeze(1)
+            
+            gauss = torch.exp(-((x - centers) ** 2) / (2 * sigma ** 2))
+            
+            result = torch.sum(heights * gauss, dim=2)
+            print(f"result: \n {result}")
+            return result
+
+        # Compute gaussian predictions for actual mzs
+        gaussian_pred_probabilities = gaussian_prediction(actual_mzs, pred_mzs, pred_probabilities, sigma)
+
+        # Clamp values to avoid zeros
+        gaussian_pred_probabilities = torch.clamp(gaussian_pred_probabilities, min=epsilon)
+
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(gaussian_pred_probabilities, actual_probabilities, dim=1)
+
+        # Convert similarity to loss (1 - similarity)
+        loss = 1 - similarity
+
+        return loss.mean()
 
     def train(self, mode=True):
         super(CustomChemBERTaModel, self).train(mode)
@@ -332,7 +335,19 @@ def greedy_cosine(mz_a, mz_b, intensities_a, intensities_b):
 # ----- Testing -----
 
 
+# if __name__ == "__main__":
+    
 
+#     model = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
+    
+#     # Add the supplementary_data_dim parameter
+#     MS_model = CustomChemBERTaModel(model, max_fragments=512, max_seq_length=512, supplementary_data_dim=81)  # Adjust the value of supplementary_data_dim as needed
+
+#     print(MS_model)
+
+#     for name, param in MS_model.named_parameters():
+#         if param.requires_grad:
+#             print(f"{name} has shape {param.shape}")
     
 if __name__ == "__main__":
     print("Testing")
