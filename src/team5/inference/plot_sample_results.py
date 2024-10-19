@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import torch
 
 from .infer import process_input_data, process_model_output
 
