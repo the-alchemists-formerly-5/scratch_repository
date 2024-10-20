@@ -153,8 +153,7 @@ def main(args):
             resume_step = None
         else:
             resume_step = int(training_difference.replace("step_", ""))
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
+            starting_epoch = (resume_step // len(train_dataloader)) - 1
 
 
     grad_norm = None
