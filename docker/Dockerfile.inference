@@ -3,7 +3,9 @@ FROM --platform=linux/amd64 ubuntu:22.04
 
 # Upgrade pip within the virtual environment
 # Install curl and python3-pip if they're not already in the base image
-RUN apt-get update && apt-get install -y curl python3-pip
+RUN apt-get update && apt-get install -y curl python3.11 python3-pip \
+    && ln -s /usr/bin/python3.11 /usr/bin/python \
+    && apt-get clean
 
 # Install Poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
@@ -32,7 +34,7 @@ RUN pip3 install poetry
 RUN python3 -m poetry config virtualenvs.create false \
     && python3 -m poetry install --no-interaction --no-ansi
 
-RUN pip install numpy transformers[torch]
+RUN pip3 install numpy transformers[torch]
 # Create a directory for mounting the data volume
 RUN mkdir /data
 
