@@ -12,7 +12,7 @@ def plot_sample_results(model, input_data, tokenizer, n_samples=5):
     )
 
     # Process input data
-    tokenized_data, supplementary_data = process_input_data(input_data, tokenizer)
+    tokenized_data, supplementary_data, _ = process_input_data(input_data, tokenizer)
 
     # Run inference
     with torch.no_grad():

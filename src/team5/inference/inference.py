@@ -38,6 +38,9 @@ def process_predictions(pred_mzs, pred_intensities, intensity_threshold=0.01, to
         mzs = mzs[:top_k]
         intensities = intensities[:top_k]
 
+    print(f"mzs: {mzs}")
+    print(f"intensities: {intensities}")
+
     return mzs, intensities
 
 
@@ -95,7 +98,7 @@ def main():
         input_data = input_data.head(args.n)
 
     # Run inference
-    pred_mzs, pred_intensities = infer(model, tokenizer, input_data)
+    pred_mzs, pred_intensities = infer(model, tokenizer, input_data, labels=None)
 
     # Process predictions
     results = []

@@ -16,21 +16,35 @@ def process_input_data(df, tokenizer):
         prepared_df, split="inference"
     )
 
+    if 'padded_mzs' in prepared_df.columns and 'padded_intensities' in prepared_df.columns:
+        mzs = torch.tensor(prepared_df['padded_mzs'].to_list())
+        probabilities = torch.tensor(prepared_df['padded_intensities'].to_list())
+        labels = torch.stack([mzs, probabilities], dim=-1)
+    else:
+        labels = None
+
     return {
         "input_ids": tokenized_smiles,
         "attention_mask": attention_mask,
-    }, supplementary_data
+    }, supplementary_data, labels
 
 
-def infer(model, tokenizer, input_data):
-    tokenized_data, supplementary_data = process_input_data(input_data, tokenizer)
+def infer(model, tokenizer, input_data, labels=None):
+    tokenized_data, supplementary_data, labels = process_input_data(input_data, tokenizer)
 
     with torch.no_grad():
-        outputs = model(
+        result = model(
             input_ids=tokenized_data["input_ids"],
             attention_mask=tokenized_data["attention_mask"],
             supplementary_data=supplementary_data,
+            labels=labels,
         )
+
+    if labels is not None:
+        loss, outputs = result
+        print(f"loss: {loss}")
+    else:
+        outputs = result
 
     pred_mzs, pred_intensities = process_model_output(outputs)
     return pred_mzs, pred_intensities
