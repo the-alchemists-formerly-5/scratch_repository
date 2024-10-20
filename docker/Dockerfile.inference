@@ -1,5 +1,5 @@
 # Use the existing base image
-FROM ghiret/hackathon_bio:data_image-v1.0.0
+FROM --platform=linux/amd64 ubuntu:22.04
 
 # Upgrade pip within the virtual environment
 # Install curl and python3-pip if they're not already in the base image
@@ -14,7 +14,6 @@ ENV PATH="/root/.local/bin:$PATH"
 # Configure Poetry
 RUN poetry config virtualenvs.create false
 
-
 # Set the working directory
 WORKDIR /app
 
@@ -25,7 +24,15 @@ WORKDIR /app
 COPY . /app
 
 RUN cd /app
+# Install project dependencies
+# Install Poetry using pip
+RUN pip3 install poetry
 
+# Install project dependencies
+RUN python3 -m poetry config virtualenvs.create false \
+    && python3 -m poetry install --no-interaction --no-ansi
+
+RUN pip install numpy transformers[torch]
 # Create a directory for mounting the data volume
 RUN mkdir /data
 
