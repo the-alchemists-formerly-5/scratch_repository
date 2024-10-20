@@ -14,7 +14,7 @@ This guide explains how to use the Docker image to run inference on your data.
 
 - Docker installed on your system
 - Input data in Parquet format
-- The inference Docker image built (let's assume it's named `inference-image`)
+- The inference Docker image built (let's assume it's named `ghiret/hackathon_bio:inference_image-latest`)
 
 ### Steps to Run Inference
 
@@ -27,12 +27,12 @@ This guide explains how to use the Docker image to run inference on your data.
    Use the following command to run the inference:
 
    ```bash
-   docker run -v /path/to/your/data:/data inference-image --input_file /data/input.parquet --output_file /data/output.parquet
+   docker run -v /path/to/your/data:/data ghiret/hackathon_bio:inference_image-latest --input_file /data/input.parquet --output_file /data/output.parquet
    ```
 
    This command does the following:
    - `-v /path/to/your/data:/data` mounts your local data directory to `/data` inside the container.
-   - `inference-image` is the name of your Docker image.
+   - `ghiret/hackathon_bio:inference_image-latest` is the name of your Docker image.
    - `--input_file /data/input.parquet` specifies the input file (inside the container).
    - `--output_file /data/output.parquet` specifies where to save the output file (inside the container).
 
@@ -41,7 +41,7 @@ This guide explains how to use the Docker image to run inference on your data.
    You can add more options to customize the inference:
 
    ```bash
-   docker run -v /path/to/your/data:/data inference-image \
+   docker run -v /path/to/your/data:/data ghiret/hackathon_bio:inference_image-latest \
      --input_file /data/input.parquet \
      --output_file /data/output.parquet \
      --version your_model_version \
