@@ -1,14 +1,23 @@
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 
 CHECKPOINT_DIR = Path("/app/checkpoints")
-TRACKER_FILE = CHECKPOINT_DIR / "checkpoint_tracker.json"
+LOCAL_CHECKPOINT_DIR = Path("../checkpoints")
 
 
 def update_tracker(version, description, accuracy, f1_score, set_as_latest=False):
-    if TRACKER_FILE.exists():
-        with open(TRACKER_FILE, "r") as f:
+
+    # set checkpoint_dir to be the local_checkpoint_dir, but relative to this script file
+    checkpoint_dir = Path(__file__).parent / LOCAL_CHECKPOINT_DIR
+    if not checkpoint_dir.exists():
+        checkpoint_dir = CHECKPOINT_DIR
+
+    tracker_file = checkpoint_dir / "checkpoint_tracker.json"
+
+    if tracker_file.exists():
+        with open(tracker_file, "r") as f:
             tracker = json.load(f)
     else:
         tracker = {"latest": None, "checkpoints": []}
@@ -33,7 +42,7 @@ def update_tracker(version, description, accuracy, f1_score, set_as_latest=False
         tracker["latest"] = version
 
     # Write updated tracker back to file
-    with open(TRACKER_FILE, "w") as f:
+    with open(tracker_file, "w") as f:
         json.dump(tracker, f, indent=2)
 
     print(f"Updated checkpoint tracker with version {version}")
