@@ -142,8 +142,8 @@ class FinalLayers(nn.Module):
 
 class CustomChemBERTaModel(nn.Module):
     def __init__(self, model, max_fragments, max_seq_length, supplementary_data_dim, 
-                 initial_sigma=1.0, final_sigma=1.0, eval_sigma=1.0, total_steps=1000000, 
-                 prob_threshold=1e-4, mz_max_value=2000):
+                 initial_sigma=0.1, final_sigma=0.1, eval_sigma=0.1, total_steps=1000000, 
+                 prob_threshold=1e-3, mz_max_value=2000):
         super(CustomChemBERTaModel, self).__init__()
         self.model = model
         self.max_fragments = max_fragments

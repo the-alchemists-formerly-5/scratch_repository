@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer, get_scheduler
@@ -53,7 +54,7 @@ def setup_wandb():
     return wandb_enabled
 
 
-def main():
+def main(args):
     os.environ["WANDB_API_KEY"] = "69f075ac6ff5b82fb8e32313942465d0a23c6ead"
 
     # Setup Weights & Biases
@@ -137,8 +138,29 @@ def main():
     accelerator.print(f"Output directory: {output_dir}")
     peft_model.train()
     global_step = 0
+    starting_epoch = 0
+
+    # Potentially load in the weights and states from a previous save
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
+            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
+            accelerator.load_state(args.resume_from_checkpoint)
+            path = os.path.basename(args.resume_from_checkpoint)
+        training_difference = os.path.splitext(path)[0]
+
+        if "epoch" in training_difference:
+            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+            resume_step = None
+        else:
+            resume_step = int(training_difference.replace("step_", ""))
+            starting_epoch = resume_step // len(train_dataloader)
+            resume_step -= starting_epoch * len(train_dataloader)
+
+
     grad_norm = None
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(starting_epoch, NUM_EPOCHS):
+        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
+            global_step += resume_step
         for step, batch in enumerate(train_dataloader):
             loss, outputs = peft_model(**batch)
             loss = loss / gradient_accumulation_steps
@@ -185,4 +207,8 @@ def main():
 # then: export PYTHONPATH=$PYTHONPATH:`pwd` (from scratch_repository)
 # then run: accelerate check, then run using: accelerate launch src/team5/training/finetuning_training.py
 if __name__ == "__main__":
-    main()
+    # support for resuming from checkpoint through command line argument
+    parser = argparse.ArgumentParser() 
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    args = parser.parse_args()
+    main(args)
