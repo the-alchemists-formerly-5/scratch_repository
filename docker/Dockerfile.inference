@@ -1,0 +1,36 @@
+# Use the existing base image
+FROM ghiret/hackathon_bio:data_image-v1.0.0
+
+# Upgrade pip within the virtual environment
+# Install curl and python3-pip if they're not already in the base image
+RUN apt-get update && apt-get install -y curl python3-pip
+
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+
+# Add Poetry to PATH
+ENV PATH="/root/.local/bin:$PATH"
+
+# Configure Poetry
+RUN poetry config virtualenvs.create false
+
+
+# Set the working directory
+WORKDIR /app
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the entire repository into the container
+COPY . /app
+
+RUN cd /app
+
+# Create a directory for mounting the data volume
+RUN mkdir /data
+
+# Set the entrypoint to run the inference script using the predefined Poetry script
+ENTRYPOINT ["poetry", "run", "infer"]
+
+# Default command (can be overridden)
+CMD ["--help"]

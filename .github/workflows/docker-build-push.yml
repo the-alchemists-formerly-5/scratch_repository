@@ -77,3 +77,16 @@ jobs:
           BUILDKIT_INLINE_CACHE=1
         cache-from: type=registry,ref=ghiret/hackathon_bio:model_image-buildcache
         cache-to: type=registry,ref=ghiret/hackathon_bio:model_image-buildcache,mode=max
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: docker/Dockerfile.inference
+        push: true
+        tags: |
+          ghiret/hackathon_bio:inference_image-${{ steps.get_version.outputs.version }}
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+        cache-from: type=registry,ref=ghiret/hackathon_bio:inference_image-buildcache
+        cache-to: type=registry,ref=ghiret/hackathon_bio:inference_image-buildcache,mode=max
