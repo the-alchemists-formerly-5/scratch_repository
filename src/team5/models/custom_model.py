@@ -1,6 +1,7 @@
 import logging
 import torch.nn as nn
 import torch
+import einops
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 import torch.nn.functional as F
 from matchms import Spectrum
@@ -16,6 +17,45 @@ class ClampedReLU(nn.Module):
 
     def forward(self, x):
         return torch.clamp(F.relu(x), max=self.max_value)
+    
+class MultiQueryAttention(nn.Module):
+    def __init__(self, hidden_size, max_fragments):
+        super().__init__()
+        self.max_fragments = max_fragments
+        self.hidden_size = hidden_size
+        
+        # Create max_fragments number of query layers
+        self.query_layers = nn.ModuleList([
+            nn.Linear(hidden_size, 1) for _ in range(max_fragments)
+        ])
+
+    def forward(self, x, attention_mask):
+        # x: (batch_size, seq_length, hidden_size)
+        # attention_mask: (batch_size, seq_length)
+        
+        batch_size, seq_length, _ = x.size()
+        
+        # List to store attention outputs
+        attention_outputs = []
+        
+        for query_layer in self.query_layers:
+            # Calculate attention scores
+            attention_scores = query_layer(x).squeeze(-1)  # (batch_size, seq_length)
+            
+            # Apply mask
+            attention_scores = attention_scores.masked_fill(attention_mask == 0, float('-inf'))
+            
+            # Apply softmax
+            attention_weights = F.softmax(attention_scores, dim=-1)
+            
+            # Apply attention weights
+            attention_output = torch.bmm(attention_weights.unsqueeze(1), x).squeeze(1)  # (batch_size, hidden_size)
+
+            attention_outputs.append(attention_output)
+        
+        # Stack the outputs
+        return torch.stack(attention_outputs, dim=1)  # (batch_size, max_fragments, hidden_size)
+
 
 class FinalLayers(nn.Module):
     def __init__(self, hidden_size, supplementary_data_dim, max_fragments, mz_max_value=2000, prob_threshold=1e-4):
@@ -31,19 +71,19 @@ class FinalLayers(nn.Module):
         self.supplementary_dropout = nn.Dropout(0.1)
         self.supplementary_norm = nn.LayerNorm(hidden_size)
 
-        # Attention pooling
-        self.attention_query = nn.Linear(hidden_size, 1)
+        # Multi-query attention pooling
+        self.multi_query_attention = MultiQueryAttention(hidden_size, max_fragments)
 
         # MLP after attention pooling
-        self.mlp_fc1 = nn.Linear(hidden_size, hidden_size)
-        self.mlp_fc2 = nn.Linear(hidden_size, hidden_size)
+        self.mlp_fc1 = nn.Linear(hidden_size, hidden_size//2)
+        self.mlp_fc2 = nn.Linear(hidden_size//2, hidden_size//2)
         self.mlp_activation = nn.GELU()
         self.mlp_dropout = nn.Dropout(0.1)
-        self.mlp_norm = nn.LayerNorm(hidden_size)
+        self.mlp_norm = nn.LayerNorm(hidden_size//2)
 
         # Output linear layers
-        self.output_linear_mz = nn.Linear(hidden_size, self.max_fragments)
-        self.output_linear_prob = nn.Linear(hidden_size, self.max_fragments)
+        self.output_linear_mz = nn.Linear(hidden_size//2, 1)
+        self.output_linear_prob = nn.Linear(hidden_size//2, 1)
         
         # Activation for m/z values
         self.mz_activation = ClampedReLU(max_value=mz_max_value)
@@ -59,25 +99,26 @@ class FinalLayers(nn.Module):
         supplementary_data = self.supplementary_norm(supplementary_data)
         supplementary_data = self.supplementary_activation(supplementary_data)
 
-        # Attention pooling
-        attention_scores = self.attention_query(x).squeeze(-1)  # (batch_size, seq_length)
-        attention_scores = attention_scores.masked_fill(attention_mask == 0, float('-inf'))
-        attention_weights = F.softmax(attention_scores, dim=-1)
-        pooled = torch.bmm(attention_weights.unsqueeze(1), x).squeeze(1)  # (batch_size, hidden_size)
+        # Multi-query attention pooling
+        fragments = self.multi_query_attention(x, attention_mask)
 
-        # Add supplementary data
-        pooled = pooled + supplementary_data
+        # [batch_size, max_fragments, hidden_size]
+        fragments = fragments + einops.repeat(supplementary_data, 'b h -> b f h', f=self.max_fragments)
 
         # MLP
-        y = self.mlp_fc1(pooled)
-        y = self.mlp_activation(y)
-        y = self.mlp_dropout(y)
-        y = self.mlp_fc2(y)
-        y = self.mlp_norm(pooled + y)  # residual connection
+        fragments = self.mlp_fc1(fragments)
+        fragments = self.mlp_activation(fragments)
+        fragments = self.mlp_dropout(fragments)
+        fragments = self.mlp_fc2(fragments)
+        fragments = self.mlp_norm(fragments)  # residual connection
 
         # Project y to get m/z values and probabilities
-        mzs = self.output_linear_mz(y)  # Shape: (batch_size, max_fragments)
-        probs = self.output_linear_prob(y)  # Shape: (batch_size, max_fragments)
+        mzs = self.output_linear_mz(fragments)  # Shape: (batch_size, max_fragments, 1)
+        probs = self.output_linear_prob(fragments)  # Shape: (batch_size, max_fragments, 1)
+
+        # Use einops to reshape
+        mzs = einops.rearrange(mzs, 'b f 1 -> b f')
+        probs = einops.rearrange(probs, 'b f 1 -> b f')
 
         # Apply activations
         mzs = self.mz_activation(mzs)
